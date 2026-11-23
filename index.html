@@ -41,6 +41,7 @@ window.addEventListener('error',function(ev){ showErr((ev&&ev.message)+' (行 '+
      🩷 ピンクのゲート         … 光った鍵盤を同時に押す(黒鍵♯♭もあり)。手前で止まって待ってくれる
      🎼 スロープ               … 番号の順に、左から(右から)1つずつ押していく
    ポーズ中に ド+ミ+ソ を同時に押すと「かんたんモード」切りかえ
+   ポーズ中に レ+ファ+ラ を同時に押すと「無敵モード」切りかえ(ハート∞)
 
    (PCだけで試す用: A S D F G H J K L ; : ] = 白鍵12レーン、W E T Y U O P [ = 黒鍵、↑ジャンプ、↓しゃがむ、Space ポーズ、R 最初から)
    ===================================================================== */
@@ -76,7 +77,8 @@ const LANE_OF = {}; NOTES.forEach((n,i)=>{ LANE_OF[n]=i; });
 // 黒鍵: [音, 左どなりの白鍵レーン, ♯の名前, ♭の名前]
 const BLACK_KEYS=[[61,0,'ド♯','レ♭'],[63,1,'レ♯','ミ♭'],[66,3,'ファ♯','ソ♭'],[68,4,'ソ♯','ラ♭'],[70,5,'ラ♯','シ♭'],[73,7,'ド♯','レ♭'],[75,8,'レ♯','ミ♭'],[78,10,'ファ♯','ソ♭']];
 const BLK={}; BLACK_KEYS.forEach(b=>{ BLK[b[0]]=b; });
-const EASY_COMBO=[60,64,67];   // ド ミ ソ(ポーズ中に同時押しでかんたんモード切りかえ)
+const EASY_COMBO=[60,64,67];
+const GOD_COMBO=[62,65,69];    // レ ファ ラ(ポーズ中に同時押しで無敵モード切りかえ)   // ド ミ ソ(ポーズ中に同時押しでかんたんモード切りかえ)
 const FONT = "'Hiragino Maru Gothic ProN','Hiragino Sans','Yu Gothic','Meiryo',sans-serif";   // 外部フォントは使わない(読み込み待ちで止まらないように)
 
 /* ---------- 3D(疑似)まわり ---------- */
@@ -121,9 +123,10 @@ const held = new Set();
 let midiText='MIDIをさがしてます…';
 let player, obstacles=[], dist=0, speed=CONFIG.speedStart, level=0, lvT=0, lives=CONFIG.lives, score=0;
 let best=0, newRecord=false, spawnCd=1.2, shake=0, flash=0, toast='', toastT=0, goAt=0, bag=[];
-let easy=false;
+let easy=false, god=false;
 try{ best = parseInt(localStorage.getItem('kenban-runner-best')||'0',10)||0; }catch(e){}
 try{ easy = localStorage.getItem('kenban-runner-easy')==='1'; }catch(e){}
+try{ god = localStorage.getItem('kenban-runner-god')==='1'; }catch(e){}
 function resetPlayer(lane){ player={lane:lane, x:lane, y:0, vy:0, crouch:false, inv:0}; }
 resetPlayer(6);
 function heldLanes(){ const s=new Set(); held.forEach(n=>{ const l=LANE_OF[n]; if(l!==undefined) s.add(l); }); return s; }
@@ -169,6 +172,7 @@ function gameOver(){
   arp([67,64,60,55],130,'sawtooth',0.1);
 }
 function damage(){
+  if(god){ player.inv=1.0; shake=0.2; flash=0.25; tone(260,0.2,'triangle',0.1,200); return; }   // 無敵モード: ハートはへらない
   lives--; player.inv=1.6; shake=0.4; flash=0.5;
   tone(180,0.32,'sawtooth',0.18,55);
   if(lives<=0) gameOver();
@@ -181,9 +185,16 @@ function toggleEasy(){
   toast=easy?'かんたんモード ON':'かんたんモード OFF'; toastT=1.8;
   arp(easy?[60,64,67]:[67,64,60],70,'triangle',0.12);
 }
+function toggleGod(){
+  god=!god;
+  try{ localStorage.setItem('kenban-runner-god',god?'1':'0'); }catch(e){}
+  toast=god?'無敵モード ON ♥∞':'無敵モード OFF'; toastT=1.8;
+  arp(god?[62,69,74,81]:[74,69,62],70,'triangle',0.12);
+}
 function activeGate(){
-  for(const o of obstacles) if(o.type==='chord'&&!o.done&&o.z<=CHORD_HOLD_Z+0.001) return o;
-  return null;
+  let c=null;
+  for(const o of obstacles) if(o.type==='chord'&&!o.done&&o.z<=CHORD_HOLD_Z+0.001&&(!c||o.z<c.z)) c=o;
+  return c;
 }
 // スロープ: 次の音を押せたら進む。ゲートの音をまちがえたら最初から
 function seqPress(n){
@@ -199,7 +210,10 @@ function noteOn(n){
   if(state==='title'){ startGame(lane===undefined?6:lane); }
   else if(state==='gameover'){ if(time-goAt>1.2) startGame(lane===undefined?6:lane); }
   else if(state==='playing'){ if(lane!==undefined) player.lane=lane; seqPress(n); }
-  else if(state==='paused'){ if(EASY_COMBO.every(x=>held.has(x))) toggleEasy(); }
+  else if(state==='paused'){
+    if(EASY_COMBO.every(x=>held.has(x))) toggleEasy();
+    else if(GOD_COMBO.every(x=>held.has(x))) toggleGod();
+  }
 }
 function noteOff(n){ held.delete(n); }
 function setBend(v){
@@ -268,6 +282,7 @@ function runs(flags){
   return out;
 }
 // むずかしさ(0〜): 奥(きょり)に行くほど上がる。かんたんモードは上がり方がおそい
+function nearGate(){ let c=null; for(const o of obstacles){ if(o.type==='chord'&&!o.done&&(!c||o.z<c.z)) c=o; } return c; }
 function dEff(){ return Math.max(0, level-(easy?CONFIG.easyLevelShift:0)); }
 function availTypes(){
   const d=dEff(), t=['block','bar'];
@@ -356,12 +371,13 @@ function spawnWave(){
     spawnCd+=0.9; return;
   }
   if(!bag.length) bag=shuffle(availTypes());    // 出せる種類をまんべんなく
-  const t=bag.pop();
+  let t=bag.pop();
+  if((t==='chord'||t==='slope') && obstacles.some(o=>o.type==='chord'&&!o.done)) t='block';   // ゲートどうしを重ねない
   if(t==='block') addHurdle(z);
   else if(t==='bar') addBar(z);
   else if(t==='wall') addWall(z);
-  else if(t==='chord'){ addChord(z); spawnCd+=0.8; }
-  else { addSlope(z); spawnCd+=0.8; }
+  else if(t==='chord'){ addChord(z); spawnCd+=1.6; }
+  else { addSlope(z); spawnCd+=1.6; }
 }
 
 /* ---------- 更新 ---------- */
@@ -510,8 +526,9 @@ function drawRoad(){
     quad(P(edgeX(i),0,0),P(edgeX(i+1),0,0),P(edgeX(i+1),0,ZFAR),P(edgeX(i),0,ZFAR),g);
   }
   // ゲートが来るレーン(同時押しの対象)をピンクに光らせる
+  const ng=nearGate();
   for(const o of obstacles){
-    if(o.type!=='chord'||o.done||o.z>60) continue;
+    if(o!==ng||o.z>60) continue;
     const z0=Math.max(0.1,o.z);
     for(const l of o.lanes) quad(P(edgeX(l),0,0),P(edgeX(l+1),0,0),P(edgeX(l+1),0,z0),P(edgeX(l),0,z0),'rgba(255,122,217,0.22)');
   }
@@ -660,9 +677,11 @@ function drawKeys(){
   const pressed=heldLanes();
   const warn=new Array(LANES).fill(null), bwarn={};
   const setW=(l,z,type,gl,done)=>{ if(!warn[l]||z<warn[l].z) warn[l]={z:Math.max(z,0),type:type,gl:gl,done:done}; };
+  const ng=nearGate();
   for(const o of obstacles){
     if(o.hit||o.done||o.z+o.d<0||o.z>34) continue;
     if(o.type==='chord'){
+      if(o!==ng) continue;
       o.notes.forEach((n,i)=>{
         const done=o.seq?i<o.idx:held.has(n), gl=o.seq?String(i+1):'♪', l=LANE_OF[n];
         if(l!==undefined) setW(l,o.z,'chord',gl,done);
@@ -733,10 +752,11 @@ function drawHUD(){
   txt(score+' m',pad,48*k,34*k,'#ffffff','left',900);
   txt('BEST '+best+' m',pad,76*k,14*k,'#ffd24a','left',700);
   for(let i=0;i<CONFIG.lives;i++){
-    txt('♥',cx+(i-(CONFIG.lives-1)/2)*34*k,36*k,30*k,i<lives?'#ff5d7a':'rgba(255,255,255,0.18)','center',900);
+    txt('♥',cx+(i-(CONFIG.lives-1)/2)*34*k,36*k,30*k,god?'#ffd24a':(i<lives?'#ff5d7a':'rgba(255,255,255,0.18)'),'center',900);
   }
+  if(god) txt('∞ 無敵',cx,64*k,15*k,'#ffd24a','center',900);
   const gw=140*k, gx=W-pad-gw;
-  txt((easy?'かんたん  ':'')+'LV '+(level+1),W-pad,22*k,15*k,easy?'#8fe388':'#ffffff','right',900);
+  txt((god?'無敵  ':'')+(easy?'かんたん  ':'')+'LV '+(level+1),W-pad,22*k,15*k,easy?'#8fe388':'#ffffff','right',900);
   // ピッチ
   txt('PITCH',gx-8*k,50*k,11*k,'#b8aee0','right',700);
   ctx.fillStyle='rgba(255,255,255,0.12)'; rr(gx,45*k,gw,10*k,5*k); ctx.fill();
@@ -761,7 +781,7 @@ function drawHUD(){
   // ゲートが近いときのお知らせ(のこり時間つき)
   if(state==='playing'){
     let c=null;
-    for(const o of obstacles){ if(o.type==='chord'&&!o.done&&o.z<34&&o.z+o.d>-0.25&&(!c||o.z<c.z)) c=o; }
+    { const g0=nearGate(); if(g0&&g0.z<34&&g0.z+g0.d>-0.25) c=g0; }
     if(c){
       const head = c.seq ? (c.notes[0]<c.notes[c.notes.length-1]?'左':'右')+'から順番に押して!' : '同時に押して!';
       fitTxt(head+'  '+gateName(c),cx,H*0.255,30*k,'#ff7ad9',W*0.95);
@@ -786,7 +806,7 @@ function drawOverlay(){
     ctx.globalAlpha=blink();
     txt('どれか鍵盤を押してスタート!',cx,H*0.27,28*k,'#ffd24a','center',900);
     ctx.globalAlpha=1;
-    const pw=760*k, ph=316*k, px=cx-pw/2, py=H*0.31;
+    const pw=760*k, ph=322*k, px=cx-pw/2, py=H*0.31;
     ctx.fillStyle='rgba(255,255,255,0.09)'; rr(px,py,pw,ph,18*k); ctx.fill();
     const rows=[
       ['#ffd24a','鍵盤を押す','そのレーンへ移動(ド〜ソの12レーン)'],
@@ -797,9 +817,10 @@ function drawOverlay(){
       ['#ffa8e8','スロープ','数字の順に1つずつ押す(左から/右から)'],
       ['#8fe388','MODホイール','最大=ポーズ / 中間=再開 / 最小=最初から'],
       ['#ffd24a','かんたんモード','ポーズ中に ド+ミ+ソ を同時に押して切りかえ'],
+      ['#ff9f43','無敵モード(ハート∞)','ポーズ中に レ+ファ+ラ を同時に押して切りかえ'],
     ];
     rows.forEach((r,i)=>{
-      const yy=py+(28+i*36)*k;
+      const yy=py+(28+i*33)*k;
       ctx.fillStyle=r[0]; ctx.beginPath(); ctx.arc(px+26*k,yy,8*k,0,Math.PI*2); ctx.fill();
       txt(r[1],px+46*k,yy,18*k,'#ffffff','left',900);
       txt(r[2],px+270*k,yy,17*k,'#d8d0f5','left',500);
@@ -809,8 +830,10 @@ function drawOverlay(){
     txt('ポーズ中',cx,H*0.30,60*k,'#ffffff','center',900);
     txt('MODホイールを少し下げると再開',cx,H*0.42,24*k,'#ffd24a','center',700);
     txt('いちばん下げると最初から',cx,H*0.49,20*k,'#b8aee0','center',500);
-    txt('かんたんモード: '+(easy?'ON':'OFF'),cx,H*0.58,30*k,easy?'#8fe388':'#ffffff','center',900);
-    txt('ド + ミ + ソ を同時に押すと切りかえ',cx,H*0.65,20*k,'#ffd24a','center',700);
+    txt('かんたんモード: '+(easy?'ON':'OFF'),cx,H*0.57,30*k,easy?'#8fe388':'#ffffff','center',900);
+    txt('ド + ミ + ソ を同時に押すと切りかえ',cx,H*0.63,18*k,'#ffd24a','center',700);
+    txt('無敵モード(ハート∞): '+(god?'ON':'OFF'),cx,H*0.71,30*k,god?'#ffd24a':'#ffffff','center',900);
+    txt('レ + ファ + ラ を同時に押すと切りかえ',cx,H*0.76,18*k,'#ff9f43','center',700);
   }else if(state==='gameover'){
     dim(0.62);
     txt('GAME OVER',cx,H*0.25,62*k,'#ff5d7a','center',900);
