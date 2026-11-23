@@ -4,16 +4,23 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
 <title>鍵盤ランナー</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Zen+Maru+Gothic:wght@500;700;900&display=swap" rel="stylesheet">
 <style>
   html,body{margin:0;height:100%;background:#0a0720;overflow:hidden;touch-action:none;-webkit-user-select:none;user-select:none}
-  canvas{display:block;width:100vw;height:100vh;height:100dvh}
+  canvas{display:block;position:fixed;left:0;top:0}
+  #boot{position:fixed;left:0;right:0;top:40%;text-align:center;color:#ffd24a;font:700 20px/1.6 -apple-system,'Hiragino Sans',sans-serif;pointer-events:none}
+  #boot small{display:block;color:#b8aee0;font-weight:500;font-size:13px}
+  #err{display:none;position:fixed;left:12px;right:12px;bottom:12px;margin:0;padding:10px 12px;border-radius:10px;background:rgba(120,0,30,0.92);color:#fff;font:600 13px/1.5 -apple-system,'Hiragino Sans',sans-serif;white-space:pre-wrap;z-index:9}
 </style>
 </head>
 <body>
 <canvas id="c"></canvas>
+<div id="boot">🎹 鍵盤ランナーを読み込み中…<small>この文字が消えないときは、画面のスクリーンショットを送ってね</small></div>
+<pre id="err"></pre>
+<script>
+/* エラーが起きたら画面の下に赤く表示する(原因さがし用) */
+function showErr(msg){ try{ var e=document.getElementById('err'); if(e){ e.style.display='block'; e.textContent='⚠ エラー: '+msg; } }catch(_){} }
+window.addEventListener('error',function(ev){ showErr((ev&&ev.message)+' (行 '+((ev&&ev.lineno)||'?')+')'); });
+</script>
 <script>
 (() => {
 'use strict';
@@ -56,7 +63,7 @@ const NOTES  = [60,62,64,65,67,69,71,72,74,76,77,79];           // C4 D4 E4 F4 G
 const LABELS = ['ド','レ','ミ','ファ','ソ','ラ','シ','ド','レ','ミ','ファ','ソ'];
 const HIGH   = [0,0,0,0,0,0,0,1,1,1,1,1];                        // 1 = 高い(上に線)
 const LANE_OF = {}; NOTES.forEach((n,i)=>{ LANE_OF[n]=i; });
-const FONT = "'Zen Maru Gothic','Hiragino Maru Gothic ProN','Hiragino Sans','Yu Gothic',sans-serif";
+const FONT = "'Hiragino Maru Gothic ProN','Hiragino Sans','Yu Gothic','Meiryo',sans-serif";   // 外部フォントは使わない(読み込み待ちで止まらないように)
 
 /* ---------- 3D(疑似)まわり ---------- */
 const F = 12;          // 遠近のゆるさ
@@ -72,7 +79,9 @@ const ctx = cv.getContext('2d');
 let W=0, H=0, DPR=1;
 function resize(){
   DPR = Math.min(window.devicePixelRatio||1, 2);
-  W = window.innerWidth; H = window.innerHeight;
+  W = window.innerWidth  || (document.documentElement && document.documentElement.clientWidth)  || 1024;
+  H = window.innerHeight || (document.documentElement && document.documentElement.clientHeight) || 768;
+  cv.style.width = W+'px'; cv.style.height = H+'px';
   cv.width = Math.round(W*DPR); cv.height = Math.round(H*DPR);
   ctx.setTransform(DPR,0,0,DPR,0,0);
 }
@@ -191,7 +200,7 @@ function initMIDI(){
     hook(); acc.onstatechange=hook;
   }).catch(()=>{ midiText='MIDIが許可されませんでした'; });
 }
-initMIDI();
+try{ initMIDI(); }catch(e){ midiText='MIDIの準備でエラー: '+((e&&e.message)||e); }
 
 /* ---------- 入力(PCキーボード: テスト用) ---------- */
 const KEYMAP=['KeyA','KeyS','KeyD','KeyF','KeyG','KeyH','KeyJ','KeyK','KeyL','Semicolon','Quote','Backslash'];
@@ -680,13 +689,19 @@ function render(dt){
 }
 
 /* ---------- メインループ ---------- */
+let booted=false;
 function frame(ts){
-  const dt=Math.min(0.05,(ts-last)/1000||0); last=ts;
-  time+=dt;
-  layout();
-  update(dt);
-  shake=Math.max(0,shake-dt); flash=Math.max(0,flash-dt*1.4); toastT=Math.max(0,toastT-dt);
-  render(dt);
+  try{
+    const dt=Math.min(0.05,(ts-last)/1000||0); last=ts;
+    time+=dt;
+    const iw=window.innerWidth||W, ih=window.innerHeight||H;
+    if(iw!==W || ih!==H) resize();          // 画面サイズが変わった/あとから決まったとき
+    layout();
+    update(dt);
+    shake=Math.max(0,shake-dt); flash=Math.max(0,flash-dt*1.4); toastT=Math.max(0,toastT-dt);
+    render(dt);
+    if(!booted){ booted=true; const b=document.getElementById('boot'); if(b) b.style.display='none'; }
+  }catch(e){ showErr((e&&e.message)||String(e)); }
   requestAnimationFrame(frame);
 }
 requestAnimationFrame(frame);
