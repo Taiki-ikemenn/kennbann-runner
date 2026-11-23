@@ -43,7 +43,9 @@ window.addEventListener('error',function(ev){ showErr((ev&&ev.message)+' (行 '+
    ポーズ中に ド+ミ+ソ を同時に押すと「かんたんモード」切りかえ
    ポーズ中に レ+ファ+ラ を同時に押すと「無敵モード」切りかえ(ハート∞)
    ポーズ中に レ+ファ+ラ+高いド を同時に押すと「やり直しモード」(無敵中にミスすると同じ障害物がもう一度出る・きょり/レベルはそのまま)
-   タッチ: 下の鍵盤をタップ=鍵盤 / 鍵盤から上にスライド=ジャンプ / 下にスライド=しゃがむ(指をはなすまで)
+   🪜 階段+マグマ            … 3レーン幅。ジャンプで3段のぼる。のれないとマグマに落ちてハート0
+   🔨 こわすモード           … ポーズ中に ド→レ→ミ を順番に押す(またはボタン)。四角がきたレーンの鍵盤をタイミングよく押してこわす
+   タッチ: 画面のどこでも 上スライド=ジャンプ / 下スライド=しゃがむ。下の鍵盤をタップ=鍵盤 / 鍵盤から上にスライド=ジャンプ / 下にスライド=しゃがむ(指をはなすまで)
    つづきから・復活: 高いソを押す(または画面のボタン)。「最初から」はかくにんが出る
 
    (PCだけで試す用: A S D F G H J K L ; : ] = 白鍵12レーン、W E T Y U O P [ = 黒鍵、↑ジャンプ、↓しゃがむ、Space ポーズ、R 最初から)
@@ -127,11 +129,15 @@ const held = new Set();
 let midiText='MIDIをさがしてます…';
 let player, obstacles=[], dist=0, speed=CONFIG.speedStart, level=0, lvT=0, lives=CONFIG.lives, score=0;
 let best=0, newRecord=false, spawnCd=1.2, shake=0, flash=0, toast='', toastT=0, goAt=0, bag=[];
+let mode='run', bestB=0, combo=0, parts=[], seqBuf=[], brokenN=0;
 let easy=false, god=false, retry=false, godPend=0, saved=0, saveT=0, confirmFrom='paused', btns=[];
 try{ best = parseInt(localStorage.getItem('kenban-runner-best')||'0',10)||0; }catch(e){}
 try{ easy = localStorage.getItem('kenban-runner-easy')==='1'; }catch(e){}
 try{ god = localStorage.getItem('kenban-runner-god')==='1'; }catch(e){}
 try{ retry = localStorage.getItem('kenban-runner-retry')==='1'; }catch(e){}
+try{ mode = localStorage.getItem('kenban-runner-mode')==='break'?'break':'run'; bestB = parseInt(localStorage.getItem('kenban-runner-best-break')||'0',10)||0; }catch(e){}
+const BREAK_LIVES=2, BRICK_Z=40, STAIR_H=[0.4,0.8,1.2];
+function maxLives(){ return mode==='break'?BREAK_LIVES:CONFIG.lives; }
 try{ saved = parseInt(localStorage.getItem('kenban-runner-save')||'0',10)||0; }catch(e){}
 function resetPlayer(lane){ player={lane:lane, x:lane, y:0, vy:0, crouch:false, inv:0}; }
 resetPlayer(6);
@@ -165,24 +171,30 @@ window.addEventListener('touchstart', getAC, {passive:true});
 function startGame(lane,fromDist){
   state='playing';
   resetPlayer(lane);
-  obstacles=[]; bag=[]; dist=0; speed=CONFIG.speedStart; level=0; lvT=0; lives=CONFIG.lives; score=0;
+  obstacles=[]; bag=[]; dist=0; speed=CONFIG.speedStart; level=0; lvT=0; lives=maxLives(); score=0;
   spawnCd=1.2; shake=0; flash=0; newRecord=false; jumpReq=0; toastT=0;
-  saveT=0;
+  saveT=0; combo=0; parts=[]; brokenN=0; if(mode==='break') spawnCd=0.4;
   if(fromDist>0){ dist=fromDist; level=Math.min(CONFIG.maxLevel,Math.floor(dist/CONFIG.metersPerLevel)); score=Math.floor(dist); }
   arp([60,64,67,72],70,'triangle',0.12);
 }
 function saveProgress(force){
-  if(dist<30) return;
+  if(mode!=='run'||dist<30) return;
   saved=Math.floor(dist);
   try{ localStorage.setItem('kenban-runner-save',String(saved)); }catch(e){}
 }
 function continueGame(lane){ startGame(lane,saved); toast='つづきから '+saved+' m'; toastT=1.5; }
 function revive(){
-  state='playing'; lives=CONFIG.lives; obstacles=[]; bag=[]; spawnCd=1.2; jumpReq=0; newRecord=false;
+  state='playing'; lives=maxLives(); obstacles=[]; bag=[]; spawnCd=1.2; jumpReq=0; newRecord=false;
   player.inv=2; player.y=0; player.vy=0; toast='復活!'; toastT=1.4; arp([60,67,72,79],70,'triangle',0.12);
 }
 function askRestart(){ if(state==='playing'||state==='paused'){ confirmFrom=state; state='confirm'; tone(300,0.12,'square',0.05); } }
 function cancelRestart(){ if(state==='confirm') state='paused'; }
+function toggleBreak(){
+  mode=mode==='break'?'run':'break';
+  try{ localStorage.setItem('kenban-runner-mode',mode); }catch(e){}
+  toTitle(); toast=mode==='break'?'こわすモード!':'ランナーモード'; toastT=2;
+  arp([60,64,67,72],70,'triangle',0.12);
+}
 function toggleRetry(){
   retry=!retry;
   try{ localStorage.setItem('kenban-runner-retry',retry?'1':'0'); }catch(e){}
@@ -199,12 +211,13 @@ function respawnObstacle(o){
 function tickCombo(){
   if(godPend && time>=godPend){ godPend=0; if(state==='paused' && GOD_COMBO.every(x=>held.has(x))) toggleGod(); }
 }
-function toTitle(){ state='title'; obstacles=[]; resetPlayer(6); dist=0; score=0; level=0; lives=CONFIG.lives; jumpReq=0; }
+function toTitle(){ state='title'; obstacles=[]; parts=[]; combo=0; resetPlayer(6); dist=0; score=0; level=0; lives=maxLives(); jumpReq=0; }
 function pause(){ if(state==='playing'){ state='paused'; tone(330,0.15,'square',0.06,220); } }
 function resume(){ if(state==='paused'){ state='playing'; tone(440,0.15,'square',0.06,660); } }
 function gameOver(){
   state='gameover'; goAt=time; jumpReq=0; saveProgress(true);
-  if(score>best){ best=score; newRecord=true; try{ localStorage.setItem('kenban-runner-best',String(best)); }catch(e){} }
+  if(mode==='break'){ if(score>bestB){ bestB=score; newRecord=true; try{ localStorage.setItem('kenban-runner-best-break',String(bestB)); }catch(e){} } }
+  else if(score>best){ best=score; newRecord=true; try{ localStorage.setItem('kenban-runner-best',String(best)); }catch(e){} }
   arp([67,64,60,55],130,'sawtooth',0.1);
 }
 function damage(o){
@@ -243,12 +256,14 @@ function noteOn(n){
   held.add(n);
   tone(mtof(n),0.35,'triangle',0.15);
   const lane = LANE_OF[n], ln = lane===undefined?6:lane;
-  if(state==='title'){ if(n===CONT_NOTE && saved>=30) continueGame(ln); else startGame(ln); }
+  if(state==='title'){ if(n===CONT_NOTE && saved>=30 && mode==='run') continueGame(ln); else startGame(ln); }
   else if(state==='gameover'){ if(time-goAt>1.2){ if(n===CONT_NOTE) revive(); else startGame(ln); } }
-  else if(state==='playing'){ if(lane!==undefined) player.lane=lane; seqPress(n); }
+  else if(state==='playing'){ if(lane!==undefined) player.lane=lane; if(mode==='break'){ if(lane!==undefined) breakPress(lane); } else seqPress(n); }
   else if(state==='confirm'){ if(n===60) cancelRestart(); else if(n===CONT_NOTE) toTitle(); }
   else if(state==='paused'){
     const has=a=>a.every(x=>held.has(x));
+    seqBuf.push({n:n,t:time}); seqBuf=seqBuf.filter(e=>time-e.t<3).slice(-3);
+    if(seqBuf.length===3 && seqBuf[0].n===60 && seqBuf[1].n===62 && seqBuf[2].n===64){ seqBuf=[]; toggleBreak(); return; }   // ド→レ→ミ
     if(has(EASY_COMBO)) toggleEasy();
     else if(n===72 && has(GOD_COMBO)){ godPend=0; toggleRetry(); }
     else if(has(GOD_COMBO)) godPend=time+0.4;   // 高いドが続けて押されるか少し待つ
@@ -330,6 +345,7 @@ cv.addEventListener('pointerdown',e=>{
   const x=e.clientX, y=e.clientY, b=hitBtn(x,y);
   if(b){ b.fn(); return; }
   if(y>=nearY){ const n=keyAt(x,y); if(n!==null){ ptrs.set(e.pointerId,{n:n,y:y,mode:0}); noteOn(n); } }
+  else ptrs.set(e.pointerId,{n:null,y:y,mode:0});   // 画面のどこでもスライドでジャンプ/しゃがみ
 });
 cv.addEventListener('pointermove',e=>{
   const p=ptrs.get(e.pointerId); if(!p) return;
@@ -340,7 +356,7 @@ cv.addEventListener('pointermove',e=>{
 });
 function endPtr(e){
   const p=ptrs.get(e.pointerId); if(!p) return;
-  ptrs.delete(e.pointerId); noteOff(p.n);
+  ptrs.delete(e.pointerId); if(p.n!==null) noteOff(p.n);
   if(p.mode===2 && !crouchTouch()) setBend(0);
 }
 cv.addEventListener('pointerup',endPtr); cv.addEventListener('pointercancel',endPtr);
@@ -362,7 +378,7 @@ function dEff(){ return Math.max(0, level-(easy?CONFIG.easyLevelShift:0)); }
 function availTypes(){
   const d=dEff(), t=['block','bar'];
   if(d>=1) t.push('wall');
-  if(d>=2) t.push('chord');
+  if(d>=2) t.push('chord','stairs');
   if(d>=3) t.push('slope');
   return t;
 }
@@ -438,6 +454,82 @@ function addSlope(z){
   if(Math.random()<0.5) notes.reverse();
   makeGate(z,notes,true,black);
 }
+// 🪜 階段+マグマ(3レーン): ジャンプで3段のぼる。のれないとマグマに落ちてハート0
+function addStairs(z){
+  const l0=Math.floor(Math.random()*(LANES-2)), sd=Math.max(6,speed*0.95), pit=Math.max(2.2,sd*0.35);
+  obstacles.push({type:'stairs',l0:l0,l1:l0+2,z:z,d:pit+3*sd,sd:sd,pit:pit,hit:false});
+  spawnCd+=(pit+3*sd)/speed+0.6;
+}
+// 手前のマグマの池(-1) → 1段目(0) → 2段目(1) → 3段目(2)。はんい外は -2
+function stairIdx(o){
+  if(o.z>0||o.z+o.d<=0) return -2;
+  const into=-o.z; if(into<o.pit) return -1;
+  return Math.min(2,Math.floor((into-o.pit)/o.sd));
+}
+function stairH(o){ const i=stairIdx(o); return i>=0?STAIR_H[i]:0; }
+function groundAt(){
+  let g=0;
+  for(const o of obstacles){ if(o.type==='stairs'&&player.lane>=o.l0&&player.lane<=o.l1){ const h=stairH(o); if(h>g) g=h; } }
+  return g;
+}
+function lavaDeath(o,h){
+  if(god){ if(retry) respawnObstacle(o); player.y=h; player.vy=0; player.inv=1; return; }
+  lives=0; flash=0.7; shake=0.6; tone(90,0.5,'sawtooth',0.2,40);
+  gameOver();
+}
+/* ---------- こわすモード ---------- */
+function bwin(){ const m=easy?1.35:1; return {pf:0.09*m, gd:0.2*m, early:0.7*m}; }
+function bspeed(){ return (9+Math.min(9,brokenN*0.22))*(easy?CONFIG.easySpeed:1); }
+function spawnBreak(){
+  const two=brokenN>=12 && Math.random()<0.25;
+  pickLanes(two?2:1).forEach(l=>obstacles.push({type:'brick',l0:l,l1:l,z:BRICK_Z,d:1.0,hit:false,done:false}));
+}
+function breakMiss(o,msg){
+  combo=0; toast=msg; toastT=0.8; player.inv=0; damage(null);
+}
+function shatter(b,perfect){
+  const pt=P(laneCx(b.l0),0.4,Math.max(0,b.z+b.d/2)), k=sc(), n=perfect?48:30, h=b.l0*30;
+  for(let i=0;i<n;i++){
+    const a=Math.random()*Math.PI*2, v=(120+Math.random()*440)*k;
+    parts.push({x:pt[0]+(Math.random()-0.5)*40*k,y:pt[1]+(Math.random()-0.5)*30*k,vx:Math.cos(a)*v,vy:Math.sin(a)*v-280*k,rot:Math.random()*6,vr:(Math.random()-0.5)*20,sz:(5+Math.random()*14)*k,life:0.7+Math.random()*0.6,col:'hsl('+((h+Math.random()*50)%360)+',90%,'+(55+Math.random()*25)+'%)'});
+  }
+  if(perfect) for(let i=0;i<12;i++){ const a=Math.random()*Math.PI*2, v=(200+Math.random()*300)*k; parts.push({x:pt[0],y:pt[1],vx:Math.cos(a)*v,vy:Math.sin(a)*v,rot:0,vr:10,sz:(4+Math.random()*5)*k,life:0.5,col:'#ffffff'}); }
+  shake=Math.max(shake,perfect?0.16:0.1);
+  tone(mtof(72+(combo%8)),0.12,'square',0.08); tone(1100,0.18,'sawtooth',0.07,150);
+}
+function breakPress(l){
+  const w=bwin(); let b=null, bt=1e9;
+  for(const o of obstacles){
+    if(o.type!=='brick'||o.done||o.l0!==l) continue;
+    const tz=(o.z+o.d/2)/speed; if(tz<-w.gd) continue;
+    if(Math.abs(tz)<Math.abs(bt)){ b=o; bt=tz; }
+  }
+  if(!b) return;
+  const a=Math.abs(bt);
+  if(a<=w.gd){
+    b.done=true; b.ok=true; combo++; brokenN++;
+    const perfect=a<=w.pf, pts=(perfect?100:50)*(1+Math.min(5,Math.floor(combo/10)));
+    score+=pts; shatter(b,perfect); toast=(perfect?'PERFECT! +':'GOOD +')+pts; toastT=0.7;
+  }else if(bt>0 && bt<=w.early){
+    b.done=true; b.hit=true; breakMiss(b,'はやい!');
+  }
+}
+function updateBreak(dt){
+  speed=bspeed(); dist+=speed*dt;
+  spawnCd-=dt; if(spawnCd<=0){ spawnBreak(); spawnCd+=Math.max(0.7,1.25-brokenN*0.012)+Math.random()*0.5; }
+  player.x+=(player.lane-player.x)*Math.min(1,dt*16);
+  const w=bwin();
+  for(const o of obstacles){
+    if(o.type!=='brick') continue;
+    o.z-=speed*dt;
+    if(!o.done && (o.z+o.d/2)/speed<-w.gd){ o.done=true; o.hit=true; breakMiss(o,'おそい!'); if(state!=='playing') return; }
+  }
+  obstacles=obstacles.filter(o=>!o.ok && o.z+o.d>-3);
+}
+function updateParts(dt){
+  for(const q of parts){ q.vy+=1500*dt; q.x+=q.vx*dt; q.y+=q.vy*dt; q.rot+=q.vr*dt; q.life-=dt; }
+  parts=parts.filter(q=>q.life>0);
+}
 function spawnWave(){
   const z=ZSPAWN, d=dEff();
   if(d>=6 && Math.random()<0.2){                // コンボ
@@ -452,7 +544,8 @@ function spawnWave(){
   else if(t==='bar') addBar(z);
   else if(t==='wall') addWall(z);
   else if(t==='chord'){ addChord(z); spawnCd+=1.6; }
-  else { addSlope(z); spawnCd+=1.6; }
+  else if(t==='slope'){ addSlope(z); spawnCd+=1.6; }
+  else addStairs(z);
 }
 
 /* ---------- 更新 ---------- */
@@ -460,6 +553,7 @@ function update(dt){
   if(state==='title'){ dist+=6*dt; player.x+=(player.lane-player.x)*Math.min(1,dt*16); return; }
   if(state!=='playing') return;
   if(modZone==='max'){ pause(); return; }
+  if(mode==='break'){ updateBreak(dt); return; }
 
   // 奥(きょり)に行くほどレベルアップ
   const nl=Math.min(CONFIG.maxLevel,Math.floor(dist/CONFIG.metersPerLevel));
@@ -479,11 +573,19 @@ function update(dt){
   // プレイヤー
   player.x+=(player.lane-player.x)*Math.min(1,dt*16);
   jumpReq=Math.max(0,jumpReq-dt);
-  if(jumpReq>0 && player.y===0){ player.vy=JUMP_V; jumpReq=0; tone(380,0.18,'square',0.06,760); }
-  if(player.y>0 && bend<=CONFIG.bendDuck) player.vy-=60*dt;   // 空中でピッチ下げると早く落ちる
+  // 階段: その段より低いままマグマの上に入ったらアウト
+  for(const o of obstacles){
+    if(o.type!=='stairs'||o.hit||player.lane<o.l0||player.lane>o.l1) continue;
+    const i=stairIdx(o); if(i===-2) continue;
+    const need = i<0 ? 0.03 : STAIR_H[i]-0.06;   // 池の上は空中、段の上はその段より高く
+    if(player.y<need){ o.hit=true; lavaDeath(o,i<0?0:STAIR_H[i]); if(state!=='playing') return; }
+  }
+  const gh=groundAt();
+  if(jumpReq>0 && player.y<=gh+0.001){ player.vy=JUMP_V; jumpReq=0; tone(380,0.18,'square',0.06,760); }
+  if(player.y>gh && bend<=CONFIG.bendDuck) player.vy-=60*dt;   // 空中でピッチ下げると早く落ちる
   player.vy-=G*dt; player.y+=player.vy*dt;
-  if(player.y<=0){ player.y=0; player.vy=0; }
-  player.crouch = bend<=CONFIG.bendDuck && player.y===0;
+  if(player.y<=gh && player.vy<=0){ player.y=gh; player.vy=0; }
+  player.crouch = bend<=CONFIG.bendDuck && player.y<=gh+0.001;
   if(player.inv>0) player.inv-=dt;
 
   // 障害物
@@ -504,6 +606,7 @@ function update(dt){
       continue;
     }
     if(!frozen) o.z-=speed*dt;
+    if(o.type==='stairs') continue;
     if(!o.hit && o.z<0.25 && o.z+o.d>-0.25 && player.lane>=o.l0 && player.lane<=o.l1){
       let bad;
       if(o.type==='block') bad = player.y<0.5;
@@ -651,6 +754,32 @@ function drawChord(o){
     if(o.seq) t3(String(i+1),gx,WALL_H*0.9,z0,0.22,black?'#ffd24a':'#7a1f6a');
   }
 }
+function drawStairs(o){
+  const x0=edgeX(o.l0)+0.03, x1=edgeX(o.l1+1)-0.03, zn=-0.4;
+  const z0=Math.max(o.z,zn), z1=Math.max(o.z+o.d,zn+0.01), pulse=0.5+0.5*Math.sin(time*5);
+  quad(P(x0,0,z0),P(x1,0,z0),P(x1,0,z1),P(x0,0,z1),'rgb('+Math.round(205+35*pulse)+','+Math.round(55+30*pulse)+',40)','rgba(255,170,60,0.95)');
+  for(let i=0;i<6;i++){   // マグマのぶくぶく
+    const zz=z0+((time*0.6+i*0.37)%1)*(z1-z0), xx=x0+((i*0.31+0.13)%1)*(x1-x0), p=P(xx,0.03,zz), sc2=F/(F+zz);
+    ctx.fillStyle='rgba(255,226,130,0.75)'; ctx.beginPath(); ctx.arc(p[0],p[1],0.05*U*sc2,0,Math.PI*2); ctx.fill();
+  }
+  const tops=['#8fd3ff','#6bbcf5','#4aa3e8'];
+  for(let i=2;i>=0;i--){
+    const a=Math.max(o.z+o.pit+i*o.sd,zn), b=Math.max(o.z+o.pit+(i+1)*o.sd,zn);
+    if(b<=a+0.001) continue;
+    box(x0,x1,0,STAIR_H[i],a,b,tops[i],'#2f78c4','#235fa0');
+  }
+}
+function drawBrick(o){
+  const x0=edgeX(o.l0)+0.07, x1=edgeX(o.l1+1)-0.07, z0=Math.max(o.z,-0.4), z1=Math.max(o.z+o.d,-0.35), h=o.l0*30;
+  quad(P(x0,0,z0),P(x1,0,z0),P(x1,0,z1),P(x0,0,z1),'rgba(10,5,30,0.28)');
+  box(x0,x1,0,0.8,z0,z1,'hsl('+h+',90%,72%)','hsl('+h+',85%,55%)','hsl('+h+',75%,42%)');
+}
+function drawParts(){
+  for(const q of parts){
+    ctx.save(); ctx.globalAlpha=Math.max(0,Math.min(1,q.life*2)); ctx.translate(q.x,q.y); ctx.rotate(q.rot);
+    ctx.fillStyle=q.col; ctx.fillRect(-q.sz/2,-q.sz/2,q.sz,q.sz*0.7); ctx.restore();
+  }
+}
 function drawObstacle(o){
   let a=1;
   if(o.z>55) a=Math.max(0,(ZSPAWN-o.z)/(ZSPAWN-55));
@@ -660,6 +789,8 @@ function drawObstacle(o){
   if(a<=0) return;
   ctx.globalAlpha=a;
   if(o.type==='chord'){ drawChord(o); ctx.globalAlpha=1; return; }
+  if(o.type==='stairs'){ drawStairs(o); ctx.globalAlpha=1; return; }
+  if(o.type==='brick'){ if(!o.ok) drawBrick(o); ctx.globalAlpha=1; return; }
   const x0=edgeX(o.l0)+0.04, x1=edgeX(o.l1+1)-0.04, z0=o.z, z1=o.z+o.d;
   quad(P(x0,0,z0),P(x1,0,z0),P(x1,0,z1),P(x0,0,z1),'rgba(10,5,30,0.28)');
   if(o.type==='block'){
@@ -748,7 +879,7 @@ function drawPlayer(){
 }
 
 /* ---------- 手前の鍵盤(ラベル) ---------- */
-const GLYPH={ block:['▲','#ff7a2e'], bar:['▼','#18c9b0'], wall:['×','#8a7bff'], gap:['◎','#4cc26a'], chord:['♪','#ff4fc4'] };
+const GLYPH={ block:['▲','#ff7a2e'], bar:['▼','#18c9b0'], wall:['×','#8a7bff'], gap:['◎','#4cc26a'], chord:['♪','#ff4fc4'], stairs:['▲▲','#ff6a3d'], brick:['■','#ffd24a'] };
 function drawKeys(){
   const y0=nearY, hK=H-nearY;
   const pressed=heldLanes();
@@ -817,7 +948,7 @@ function drawKeys(){
 
 function drawEntities(){
   const items=[{z:0,p:true}];
-  for(const o of obstacles) items.push({z:o.z+o.d/2,o:o});
+  for(const o of obstacles) items.push({z:o.type==='stairs'?o.z+o.d:o.z+o.d/2,o:o});
   items.sort((a,b)=>b.z-a.z);
   for(const it of items){ if(it.p) drawPlayer(); else drawObstacle(it.o); }
 }
@@ -825,16 +956,17 @@ function drawEntities(){
 /* ---------- HUD・オーバーレイ ---------- */
 function drawHUD(){
   const k=sc(), pad=18*k;
-  txt('きょり',pad,22*k,13*k,'#b8aee0','left',700);
-  txt(score+' m',pad,48*k,34*k,'#ffffff','left',900);
-  txt('BEST '+best+' m',pad,76*k,14*k,'#ffd24a','left',700);
-  for(let i=0;i<CONFIG.lives;i++){
-    txt('♥',cx+(i-(CONFIG.lives-1)/2)*34*k,36*k,30*k,god?'#ffd24a':(i<lives?'#ff5d7a':'rgba(255,255,255,0.18)'),'center',900);
+  const bk=mode==='break';
+  txt(bk?'スコア':'きょり',pad,22*k,13*k,'#b8aee0','left',700);
+  txt(bk?String(score):score+' m',pad,48*k,34*k,'#ffffff','left',900);
+  txt('BEST '+(bk?bestB:best+' m'),pad,76*k,14*k,'#ffd24a','left',700);
+  for(let i=0;i<maxLives();i++){
+    txt('♥',cx+(i-(maxLives()-1)/2)*34*k,36*k,30*k,god?'#ffd24a':(i<lives?'#ff5d7a':'rgba(255,255,255,0.18)'),'center',900);
   }
   if(god) txt(retry?'∞ 無敵(やり直し)':'∞ 無敵',cx,64*k,15*k,'#ffd24a','center',900);
   if(state==='playing') btn('⏸',pad+26*k,124*k,52*k,44*k,pause,'rgba(255,255,255,0.14)');
   const gw=140*k, gx=W-pad-gw;
-  txt((god?'無敵  ':'')+(easy?'かんたん  ':'')+'LV '+(level+1),W-pad,22*k,15*k,easy?'#8fe388':'#ffffff','right',900);
+  txt((god?'無敵  ':'')+(easy?'かんたん  ':'')+(bk?'こわす'+(combo>1?'  '+combo+' COMBO':''):'LV '+(level+1)),W-pad,22*k,15*k,easy?'#8fe388':'#ffffff','right',900);
   // ピッチ
   txt('PITCH',gx-8*k,50*k,11*k,'#b8aee0','right',700);
   ctx.fillStyle='rgba(255,255,255,0.12)'; rr(gx,45*k,gw,10*k,5*k); ctx.fill();
@@ -890,10 +1022,11 @@ function drawOverlay(){
     ctx.globalAlpha=blink();
     txt('どれか鍵盤を押してスタート!',cx,H*0.225,26*k,'#ffd24a','center',900);
     ctx.globalAlpha=1;
-    if(saved>=30) btn('つづきから  '+saved+' m  (高いソ)',cx,H*0.285,330*k,44*k,()=>continueGame(6),'rgba(76,194,106,0.35)');
+    if(mode==='run'&&saved>=30) btn('つづきから  '+saved+' m  (高いソ)',cx,H*0.285,330*k,44*k,()=>continueGame(6),'rgba(76,194,106,0.35)');
+    if(mode==='break') txt('🔨 こわすモード',cx,H*0.285,30*k,'#ff9f43','center',900);
     const pw=760*k, ph=316*k, px=cx-pw/2, py=H*0.335;
     ctx.fillStyle='rgba(255,255,255,0.09)'; rr(px,py,pw,ph,18*k); ctx.fill();
-    const rows=[
+    const rowsRun=[
       ['#ffd24a','鍵盤を押す','そのレーンへ移動(ド〜ソの12レーン)'],
       ['#9ad1ff','タッチ','下の鍵盤タップ / 上スライド=ジャンプ / 下=しゃがむ'],
       ['#ff7a2e','オレンジの低いカベ','ピッチ↑でジャンプ'],
@@ -905,6 +1038,15 @@ function drawOverlay(){
       ['#ffd24a','かんたんモード','ポーズ中に ド+ミ+ソ'],
       ['#ff9f43','無敵モード(ハート∞)','ポーズ中に レ+ファ+ラ(+高いドでやり直し)'],
     ];
+    const rowsB=[
+      ['#ffd24a','四角がくるレーン','そのレーンの鍵盤を、手前にきたときに押す!'],
+      ['#8fe388','ぴったり押す','PERFECT +100 / GOOD +50(コンボでボーナス)'],
+      ['#ff5d7a','早すぎ・おそすぎ','ハートが1つへる(ハートは2つ)'],
+      ['#9ad1ff','タッチ','下の鍵盤をタップ'],
+      ['#8fe388','MODホイール','最大=ポーズ / 中間=再開 / 最小=最初から(かくにん)'],
+      ['#ffa8e8','ランナーにもどる','ポーズ中に ド→レ→ミ を順番に押す / ボタン'],
+    ];
+    const rows=mode==='break'?rowsB:rowsRun;
     rows.forEach((r,i)=>{
       const yy=py+(22+i*29.5)*k;
       ctx.fillStyle=r[0]; ctx.beginPath(); ctx.arc(px+24*k,yy,7*k,0,Math.PI*2); ctx.fill();
@@ -914,19 +1056,20 @@ function drawOverlay(){
   }else if(state==='paused'){
     dim(0.66);
     txt('ポーズ中',cx,H*0.15,54*k,'#ffffff','center',900);
-    btn('▶ 再開',cx-130*k,H*0.28,230*k,58*k,resume,'rgba(76,194,106,0.4)');
-    btn('⏮ 最初から',cx+130*k,H*0.28,230*k,58*k,askRestart,'rgba(255,93,122,0.3)');
-    const tw=210*k, ty=H*0.42, th=54*k;
+    btn('▶ 再開',cx-130*k,H*0.25,230*k,58*k,resume,'rgba(76,194,106,0.4)');
+    btn('⏮ 最初から',cx+130*k,H*0.25,230*k,58*k,askRestart,'rgba(255,93,122,0.3)');
+    const tw=210*k, ty=H*0.37, th=54*k;
     btn('かんたん '+(easy?'ON':'OFF'),cx-tw-8*k,ty,tw,th,toggleEasy,easy?'rgba(143,227,136,0.4)':null);
     btn('無敵 ♥∞ '+(god?'ON':'OFF'),cx,ty,tw,th,toggleGod,god?'rgba(255,210,74,0.4)':null);
     btn('やり直し '+(retry?'ON':'OFF'),cx+tw+8*k,ty,tw,th,toggleRetry,retry?'rgba(255,159,67,0.4)':null);
-    txt('やり直し = 無敵中にミスすると同じ障害物がもう一度(きょりはそのまま)',cx,H*0.50,16*k,'#b8aee0','center',500);
-    txt('キー: ド+ミ+ソ=かんたん / レ+ファ+ラ=無敵 / レ+ファ+ラ+高いド=やり直し',cx,H*0.57,17*k,'#ffd24a','center',700);
-    txt('MOD: 少し下げる=再開 / いちばん下げる=最初から(かくにんが出る)',cx,H*0.63,17*k,'#b8aee0','center',500);
+    btn(mode==='break'?'🏃 ランナーモードへ (ド→レ→ミ)':'🔨 こわすモードへ (ド→レ→ミ)',cx,H*0.49,440*k,58*k,toggleBreak,'rgba(255,159,67,0.35)');
+    txt('やり直し = 無敵中にミスすると同じ障害物がもう一度(きょりはそのまま)',cx,H*0.58,16*k,'#b8aee0','center',500);
+    txt('キー: ド+ミ+ソ=かんたん / レ+ファ+ラ=無敵 / レ+ファ+ラ+高いド=やり直し',cx,H*0.64,17*k,'#ffd24a','center',700);
+    txt('MOD: 少し下げる=再開 / いちばん下げる=最初から(かくにんが出る)',cx,H*0.70,17*k,'#b8aee0','center',500);
   }else if(state==='gameover'){
     dim(0.62);
     txt('GAME OVER',cx,H*0.25,62*k,'#ff5d7a','center',900);
-    txt('きょり '+score+' m',cx,H*0.37,36*k,'#ffffff','center',900);
+    txt(mode==='break'?'スコア '+score:'きょり '+score+' m',cx,H*0.37,36*k,'#ffffff','center',900);
     if(newRecord) txt('✨ NEW RECORD! ✨',cx,H*0.45,26*k,'#ffd24a','center',900);
     if(time-goAt>1.2){
       ctx.globalAlpha=blink();
@@ -944,7 +1087,7 @@ function drawOverlay(){
   }else if(state==='confirm'){
     dim(0.8);
     txt('最初からにする?',cx,H*0.24,50*k,'#ffffff','center',900);
-    txt('いまの '+Math.floor(dist)+' m まではタイトルの「つづきから」でもどれるよ',cx,H*0.34,19*k,'#d8d0f5','center',500);
+    if(mode==='run') txt('いまの '+Math.floor(dist)+' m まではタイトルの「つづきから」でもどれるよ',cx,H*0.34,19*k,'#d8d0f5','center',500);
     btn('いいえ(もどる)',cx-150*k,H*0.48,260*k,66*k,cancelRestart,'rgba(76,194,106,0.4)');
     btn('はい(最初から)',cx+150*k,H*0.48,260*k,66*k,toTitle,'rgba(255,93,122,0.35)');
     txt('キー: 低いド=いいえ / 高いソ=はい / MODを戻す=いいえ',cx,H*0.58,17*k,'#b8aee0','center',500);
@@ -955,7 +1098,7 @@ function render(dt){
   btns=[];
   ctx.save();
   if(shake>0){ const m=shake*18; ctx.translate((Math.random()-0.5)*m,(Math.random()-0.5)*m); }
-  drawSky(dt); drawRoad(); drawEntities(); drawKeys();
+  drawSky(dt); drawRoad(); drawEntities(); drawParts(); drawKeys();
   ctx.restore();
   drawHUD(); drawOverlay();
   if(flash>0){ ctx.fillStyle='rgba(255,60,60,'+(flash*0.6)+')'; ctx.fillRect(0,0,W,H); }
@@ -972,6 +1115,7 @@ function frame(ts){
     layout();
     tickCombo();
     update(dt);
+    updateParts(dt);
     shake=Math.max(0,shake-dt); flash=Math.max(0,flash-dt*1.4); toastT=Math.max(0,toastT-dt);
     render(dt);
     if(!booted){ booted=true; const b=document.getElementById('boot'); if(b) b.style.display='none'; }
