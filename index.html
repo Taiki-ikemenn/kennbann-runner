@@ -45,6 +45,7 @@ window.addEventListener('error',function(ev){ showErr((ev&&ev.message)+' (行 '+
    ポーズ中に レ+ファ+ラ+高いド を同時に押すと「やり直しモード」(無敵中にミスすると同じ障害物がもう一度出る・きょり/レベルはそのまま)
    🪜 階段+マグマ            … 3レーン幅。ジャンプで3段のぼる。のれないとマグマに落ちてハート0
    🔨 こわすモード           … ポーズ中に ド→レ→ミ を順番に押す(またはボタン)。四角がきたレーンの鍵盤をタイミングよく押してこわす
+   スタートレベル: タイトルで ◀▶ ボタン(または黒鍵 ド♯=−/レ♯=+)。LV○からスタートできる(ベスト記録はLV1スタートのときだけ)
    タッチ: 画面のどこでも 上スライド=ジャンプ / 下スライド=しゃがむ。下の鍵盤をタップ=鍵盤 / 鍵盤から上にスライド=ジャンプ / 下にスライド=しゃがむ(指をはなすまで)
    つづきから・復活: 高いソを押す(または画面のボタン)。「最初から」はかくにんが出る
 
@@ -129,6 +130,7 @@ const held = new Set();
 let midiText='MIDIをさがしてます…';
 let player, obstacles=[], dist=0, speed=CONFIG.speedStart, level=0, lvT=0, lives=CONFIG.lives, score=0;
 let best=0, newRecord=false, spawnCd=1.2, shake=0, flash=0, toast='', toastT=0, goAt=0, bag=[];
+let startLv=0, startedLv=0;
 let mode='run', bestB=0, combo=0, parts=[], seqBuf=[], brokenN=0;
 let easy=false, god=false, retry=false, godPend=0, saved=0, saveT=0, confirmFrom='paused', btns=[];
 try{ best = parseInt(localStorage.getItem('kenban-runner-best')||'0',10)||0; }catch(e){}
@@ -136,6 +138,7 @@ try{ easy = localStorage.getItem('kenban-runner-easy')==='1'; }catch(e){}
 try{ god = localStorage.getItem('kenban-runner-god')==='1'; }catch(e){}
 try{ retry = localStorage.getItem('kenban-runner-retry')==='1'; }catch(e){}
 try{ mode = localStorage.getItem('kenban-runner-mode')==='break'?'break':'run'; bestB = parseInt(localStorage.getItem('kenban-runner-best-break')||'0',10)||0; }catch(e){}
+try{ startLv = Math.max(0,Math.min(CONFIG.maxLevel,parseInt(localStorage.getItem('kenban-runner-startlv')||'0',10)||0)); }catch(e){}
 const BREAK_LIVES=2, BRICK_Z=40, STAIR_H=[0.4,0.8,1.2];
 function maxLives(){ return mode==='break'?BREAK_LIVES:CONFIG.lives; }
 try{ saved = parseInt(localStorage.getItem('kenban-runner-save')||'0',10)||0; }catch(e){}
@@ -174,7 +177,9 @@ function startGame(lane,fromDist){
   obstacles=[]; bag=[]; dist=0; speed=CONFIG.speedStart; level=0; lvT=0; lives=maxLives(); score=0;
   spawnCd=1.2; shake=0; flash=0; newRecord=false; jumpReq=0; toastT=0;
   saveT=0; combo=0; parts=[]; brokenN=0; if(mode==='break') spawnCd=0.4;
+  startedLv=0;
   if(fromDist>0){ dist=fromDist; level=Math.min(CONFIG.maxLevel,Math.floor(dist/CONFIG.metersPerLevel)); score=Math.floor(dist); }
+  else if(mode==='run' && startLv>0){ startedLv=startLv; dist=startLv*CONFIG.metersPerLevel; level=startLv; score=Math.floor(dist); toast='LV '+(startLv+1)+' からスタート!'; toastT=1.5; }
   arp([60,64,67,72],70,'triangle',0.12);
 }
 function saveProgress(force){
@@ -189,6 +194,11 @@ function revive(){
 }
 function askRestart(){ if(state==='playing'||state==='paused'){ confirmFrom=state; state='confirm'; tone(300,0.12,'square',0.05); } }
 function cancelRestart(){ if(state==='confirm') state='paused'; }
+function setStartLv(d){
+  startLv=Math.max(0,Math.min(CONFIG.maxLevel,startLv+d));
+  try{ localStorage.setItem('kenban-runner-startlv',String(startLv)); }catch(e){}
+  tone(mtof(60+startLv),0.12,'triangle',0.1);
+}
 function toggleBreak(){
   mode=mode==='break'?'run':'break';
   try{ localStorage.setItem('kenban-runner-mode',mode); }catch(e){}
@@ -217,7 +227,7 @@ function resume(){ if(state==='paused'){ state='playing'; tone(440,0.15,'square'
 function gameOver(){
   state='gameover'; goAt=time; jumpReq=0; saveProgress(true);
   if(mode==='break'){ if(score>bestB){ bestB=score; newRecord=true; try{ localStorage.setItem('kenban-runner-best-break',String(bestB)); }catch(e){} } }
-  else if(score>best){ best=score; newRecord=true; try{ localStorage.setItem('kenban-runner-best',String(best)); }catch(e){} }
+  else if(score>best && !startedLv){ best=score; newRecord=true; try{ localStorage.setItem('kenban-runner-best',String(best)); }catch(e){} }
   arp([67,64,60,55],130,'sawtooth',0.1);
 }
 function damage(o){
@@ -256,7 +266,7 @@ function noteOn(n){
   held.add(n);
   tone(mtof(n),0.35,'triangle',0.15);
   const lane = LANE_OF[n], ln = lane===undefined?6:lane;
-  if(state==='title'){ if(n===CONT_NOTE && saved>=30 && mode==='run') continueGame(ln); else startGame(ln); }
+  if(state==='title'){ if(mode==='run'&&(n===61||n===63)) setStartLv(n===63?1:-1); else if(n===CONT_NOTE && saved>=30 && mode==='run') continueGame(ln); else startGame(ln); }
   else if(state==='gameover'){ if(time-goAt>1.2){ if(n===CONT_NOTE) revive(); else startGame(ln); } }
   else if(state==='playing'){ if(lane!==undefined) player.lane=lane; if(mode==='break'){ if(lane!==undefined) breakPress(lane); } else seqPress(n); }
   else if(state==='confirm'){ if(n===60) cancelRestart(); else if(n===CONT_NOTE) toTitle(); }
@@ -1022,7 +1032,15 @@ function drawOverlay(){
     ctx.globalAlpha=blink();
     txt('どれか鍵盤を押してスタート!',cx,H*0.225,26*k,'#ffd24a','center',900);
     ctx.globalAlpha=1;
-    if(mode==='run'&&saved>=30) btn('つづきから  '+saved+' m  (高いソ)',cx,H*0.285,330*k,44*k,()=>continueGame(6),'rgba(76,194,106,0.35)');
+    if(mode==='run'&&saved>=30) btn('つづきから  '+saved+' m  (高いソ)',cx-215*k,H*0.285,330*k,44*k,()=>continueGame(6),'rgba(76,194,106,0.35)');
+    if(mode==='run'){
+      const sx=cx+250*k, sy=H*0.285;
+      btn('◀',sx-115*k,sy,54*k,44*k,()=>setStartLv(-1),null);
+      btn('▶',sx+115*k,sy,54*k,44*k,()=>setStartLv(1),null);
+      txt('スタート',sx,sy-11*k,12*k,'#b8aee0','center',700);
+      txt('LV '+(startLv+1),sx,sy+9*k,22*k,startLv>0?'#ffd24a':'#ffffff','center',900);
+      txt('黒鍵 ド♯=− / レ♯=+',sx,H*0.322,12*k,'#b8aee0','center',500);
+    }
     if(mode==='break') txt('🔨 こわすモード',cx,H*0.285,30*k,'#ff9f43','center',900);
     const pw=760*k, ph=316*k, px=cx-pw/2, py=H*0.335;
     ctx.fillStyle='rgba(255,255,255,0.09)'; rr(px,py,pw,ph,18*k); ctx.fill();
