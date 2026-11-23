@@ -1,0 +1,696 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<title>鍵盤ランナー</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Zen+Maru+Gothic:wght@500;700;900&display=swap" rel="stylesheet">
+<style>
+  html,body{margin:0;height:100%;background:#0a0720;overflow:hidden;touch-action:none;-webkit-user-select:none;user-select:none}
+  canvas{display:block;width:100vw;height:100vh;height:100dvh}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+(() => {
+'use strict';
+
+/* =====================================================================
+   鍵盤ランナー  —  MIDIキーボードで遊ぶ避けゲーム(単一HTML)
+   ---------------------------------------------------------------------
+   鍵盤(C4〜G5の白鍵12個) … そのレーンへ移動
+   ピッチベンド上げる     … ジャンプ
+   ピッチベンド下げる     … しゃがむ(下げている間)
+   MODホイール            … 最大=ポーズ / 中間=再開 / 最小=最初から
+   どれか鍵盤を押す       … スタート / リトライ
+
+   障害物は4種類
+     🟧 オレンジの低いカベ     … ジャンプでよける
+     🟦 青緑の頭上バー         … しゃがんでよける
+     🟪 紫の高いカベ           … すき間のレーンへ移動してよける
+     🩷 ピンクのゲート         … 光ったレーンの鍵盤を同時に押す
+
+   (PCだけで試す用: A S D F G H J K L ; : ] = 12レーン、↑ジャンプ、↓しゃがむ、P ポーズ、R 最初から)
+   ===================================================================== */
+
+/* ---------- 調整用の設定(ここをいじればゲーム感が変わるよ) ---------- */
+const CONFIG = {
+  lives: 3,            // ライフ
+  speedStart: 13,      // 最初の速さ
+  speedMax: 26,        // 最高の速さ
+  speedPerLevel: 1.1,  // レベルごとに上がる速さ
+  levelSeconds: 10,    // 何秒ごとにレベルアップ
+  bendJump: 0.35,      // ピッチベンドが +この値 を超えたらジャンプ(0〜1)
+  bendJumpReset: 0.15, // この値より下に戻ったら次のジャンプOK
+  bendDuck: -0.30,     // ピッチベンドが この値 以下の間はしゃがむ(0〜-1)
+  modMax: 120,         // MODがこの値以上で「最大」(0〜127)
+  modMin: 5,           // MODがこの値以下で「最小」
+};
+
+/* ---------- 鍵盤まわり ---------- */
+const LANES  = 12;
+const NOTES  = [60,62,64,65,67,69,71,72,74,76,77,79];           // C4 D4 E4 F4 G4 A4 B4 C5 D5 E5 F5 G5
+const LABELS = ['ド','レ','ミ','ファ','ソ','ラ','シ','ド','レ','ミ','ファ','ソ'];
+const HIGH   = [0,0,0,0,0,0,0,1,1,1,1,1];                        // 1 = 高い(上に線)
+const LANE_OF = {}; NOTES.forEach((n,i)=>{ LANE_OF[n]=i; });
+const FONT = "'Zen Maru Gothic','Hiragino Maru Gothic ProN','Hiragino Sans','Yu Gothic',sans-serif";
+
+/* ---------- 3D(疑似)まわり ---------- */
+const F = 12;          // 遠近のゆるさ
+const ZSPAWN = 80;     // 障害物が出てくる距離
+const ZFAR = 3000;
+const G = 20, JUMP_V = 7.5;   // ジャンプの重力と初速(ジャンプ高さ ≒ 1.4)
+const WALL_H = 2.2;           // 高いカベ・ゲートの高さ
+const CHORD_GRACE = 3;        // ゲートが手前この距離に来たら「同時押し」判定スタート
+
+/* ---------- キャンバス ---------- */
+const cv = document.getElementById('c');
+const ctx = cv.getContext('2d');
+let W=0, H=0, DPR=1;
+function resize(){
+  DPR = Math.min(window.devicePixelRatio||1, 2);
+  W = window.innerWidth; H = window.innerHeight;
+  cv.width = Math.round(W*DPR); cv.height = Math.round(H*DPR);
+  ctx.setTransform(DPR,0,0,DPR,0,0);
+}
+window.addEventListener('resize', resize); resize();
+
+let cx, horizonY, nearY, laneW, U, worldLW;
+function layout(){
+  cx = W/2; horizonY = H*0.30; nearY = H*0.80;
+  laneW = Math.min(W*0.94/LANES, 110);
+  U = Math.min(H*0.2, laneW*2.4);
+  worldLW = laneW/U;
+}
+const sc = () => Math.max(0.55, Math.min(W/1100, H/700));
+function P(x,y,z){ const s=F/(F+z); return [cx + x*U*s, horizonY + (nearY-horizonY)*s - y*U*s]; }
+const edgeX = i => (i-LANES/2)*worldLW;
+const laneCx = i => (i-(LANES-1)/2)*worldLW;
+
+/* ---------- ゲーム状態 ---------- */
+let state='title';           // title | playing | paused | gameover
+let time=0, last=0;
+let bend=0, bendArmed=true, mod=0, modZone='min', jumpReq=0;
+const held = new Set();
+let midiText='MIDIをさがしてます…';
+let player, obstacles=[], dist=0, speed=CONFIG.speedStart, level=0, lvT=0, lives=CONFIG.lives, score=0;
+let best=0, newRecord=false, spawnCd=1.2, shake=0, flash=0, toast='', toastT=0, goAt=0, bag=[];
+try{ best = parseInt(localStorage.getItem('kenban-runner-best')||'0',10)||0; }catch(e){}
+function resetPlayer(lane){ player={lane:lane, x:lane, y:0, vy:0, crouch:false, inv:0}; }
+resetPlayer(6);
+function heldLanes(){ const s=new Set(); held.forEach(n=>{ const l=LANE_OF[n]; if(l!==undefined) s.add(l); }); return s; }
+
+/* ---------- 音(WebAudio) ---------- */
+let ac=null, master=null;
+function getAC(){
+  if(!ac){
+    const C=window.AudioContext||window.webkitAudioContext;
+    if(C){ try{ ac=new C(); master=ac.createGain(); master.gain.value=0.6; master.connect(ac.destination); }catch(e){ ac=null; } }
+  }
+  if(ac && ac.state!=='running'){ try{ ac.resume(); }catch(e){} }
+  return ac;
+}
+const audioOn = () => !!ac && ac.state==='running';
+function tone(f,dur,type,vol,f2){
+  const a=getAC(); if(!a||a.state!=='running') return;
+  const t=a.currentTime, o=a.createOscillator(), g=a.createGain();
+  o.type=type||'triangle'; o.frequency.setValueAtTime(f,t);
+  if(f2) o.frequency.exponentialRampToValueAtTime(f2,t+dur);
+  g.gain.setValueAtTime(0.0001,t); g.gain.exponentialRampToValueAtTime(vol||0.15,t+0.01); g.gain.exponentialRampToValueAtTime(0.0001,t+dur);
+  o.connect(g); g.connect(master); o.start(t); o.stop(t+dur+0.03);
+}
+const mtof = n => 440*Math.pow(2,(n-69)/12);
+function arp(list,gap,type,vol){ list.forEach((n,i)=>setTimeout(()=>tone(mtof(n),0.28,type||'triangle',vol||0.14),i*gap)); }
+window.addEventListener('pointerdown', getAC);
+window.addEventListener('touchstart', getAC, {passive:true});
+
+/* ---------- 状態の切りかえ ---------- */
+function startGame(lane){
+  state='playing';
+  resetPlayer(lane);
+  obstacles=[]; bag=[]; dist=0; speed=CONFIG.speedStart; level=0; lvT=0; lives=CONFIG.lives; score=0;
+  spawnCd=1.2; shake=0; flash=0; newRecord=false; jumpReq=0; toastT=0;
+  arp([60,64,67,72],70,'triangle',0.12);
+}
+function toTitle(){ state='title'; obstacles=[]; resetPlayer(6); dist=0; score=0; level=0; lives=CONFIG.lives; jumpReq=0; }
+function pause(){ if(state==='playing'){ state='paused'; tone(330,0.15,'square',0.06,220); } }
+function resume(){ if(state==='paused'){ state='playing'; tone(440,0.15,'square',0.06,660); } }
+function gameOver(){
+  state='gameover'; goAt=time; jumpReq=0;
+  if(score>best){ best=score; newRecord=true; try{ localStorage.setItem('kenban-runner-best',String(best)); }catch(e){} }
+  arp([67,64,60,55],130,'sawtooth',0.1);
+}
+function damage(){
+  lives--; player.inv=1.6; shake=0.4; flash=0.5;
+  tone(180,0.32,'sawtooth',0.18,55);
+  if(lives<=0) gameOver();
+}
+
+/* ---------- 入力(MIDI) ---------- */
+function noteOn(n){
+  held.add(n);
+  tone(mtof(n),0.35,'triangle',0.15);
+  const lane = LANE_OF[n];
+  if(state==='title'){ startGame(lane===undefined?6:lane); }
+  else if(state==='gameover'){ if(time-goAt>1.2) startGame(lane===undefined?6:lane); }
+  else if(state==='playing'){ if(lane!==undefined) player.lane=lane; }
+}
+function noteOff(n){ held.delete(n); }
+function setBend(v){
+  bend=v;
+  if(v<=CONFIG.bendJumpReset) bendArmed=true;
+  if(v>=CONFIG.bendJump && bendArmed){ bendArmed=false; if(state==='playing') jumpReq=0.15; }
+}
+function setMod(v){
+  mod=v;
+  const z = v>=CONFIG.modMax ? 'max' : (v<=CONFIG.modMin ? 'min' : 'mid');
+  const prev=modZone; modZone=z;
+  if(z==='max'){ if(state==='playing') pause(); }
+  else if(z==='mid'){ if(state==='paused') resume(); }
+  else if(prev!=='min' && (state==='playing'||state==='paused'||state==='gameover')) toTitle();
+}
+function onMIDI(e){
+  const d=e.data; if(!d||d.length<2) return;
+  const cmd=d[0]&0xf0, d1=d[1], d2=d.length>2?d[2]:0;
+  if(cmd===0x90 && d2>0) noteOn(d1);
+  else if(cmd===0x80 || (cmd===0x90 && d2===0)) noteOff(d1);
+  else if(cmd===0xE0) setBend((((d2<<7)|d1)-8192)/8192);
+  else if(cmd===0xB0 && d1===1) setMod(d2);
+}
+function initMIDI(){
+  if(!navigator.requestMIDIAccess){ midiText='このブラウザはMIDI非対応'; return; }
+  navigator.requestMIDIAccess({sysex:false}).then(acc=>{
+    const hook=()=>{
+      const names=[];
+      acc.inputs.forEach(inp=>{ inp.onmidimessage=onMIDI; names.push(inp.name||'MIDI入力'); });
+      midiText = names.length ? '🎹 '+names.join(', ') : 'MIDI入力なし(キーボードをつないでね)';
+    };
+    hook(); acc.onstatechange=hook;
+  }).catch(()=>{ midiText='MIDIが許可されませんでした'; });
+}
+initMIDI();
+
+/* ---------- 入力(PCキーボード: テスト用) ---------- */
+const KEYMAP=['KeyA','KeyS','KeyD','KeyF','KeyG','KeyH','KeyJ','KeyK','KeyL','Semicolon','Quote','Backslash'];
+window.addEventListener('keydown',e=>{
+  if(e.repeat) return;
+  const li=KEYMAP.indexOf(e.code);
+  if(li>=0){ noteOn(NOTES[li]); e.preventDefault(); }
+  else if(e.code==='ArrowUp'){ setBend(0.8); e.preventDefault(); }
+  else if(e.code==='ArrowDown'){ setBend(-0.8); e.preventDefault(); }
+  else if(e.code==='KeyP'){ setMod(modZone==='max'?64:127); }
+  else if(e.code==='KeyR'){ setMod(64); setMod(0); }
+});
+window.addEventListener('keyup',e=>{
+  const li=KEYMAP.indexOf(e.code);
+  if(li>=0) noteOff(NOTES[li]);
+  else if(e.code==='ArrowUp'||e.code==='ArrowDown') setBend(0);
+});
+
+/* ---------- 障害物のうみだし ---------- */
+function shuffle(a){ for(let i=a.length-1;i>0;i--){ const j=Math.floor(Math.random()*(i+1)); [a[i],a[j]]=[a[j],a[i]]; } return a; }
+function pickLanes(n){ return shuffle([...Array(LANES).keys()]).slice(0,n); }
+function runs(flags){
+  const out=[]; let s=-1;
+  for(let i=0;i<=LANES;i++){
+    if(i<LANES && flags[i]){ if(s<0) s=i; }
+    else if(s>=0){ out.push([s,i-1]); s=-1; }
+  }
+  return out;
+}
+
+// 🟧 低いカベ(ジャンプ): 基本は全レーンをふさぐ。レベル3からたまに一部だけ
+function addHurdle(z){
+  if(level>=3 && Math.random()<0.4){
+    const n=Math.min(9,2+Math.floor(Math.random()*(2+level*0.5)));
+    const f=Array(LANES).fill(false); pickLanes(n).forEach(l=>{ f[l]=true; });
+    runs(f).forEach(([a,b])=>obstacles.push({type:'block',l0:a,l1:b,z:z,d:1.0,hit:false}));
+  }else{
+    obstacles.push({type:'block',l0:0,l1:LANES-1,z:z,d:1.0,hit:false});
+  }
+}
+// 🟦 頭上バー(しゃがむ): 基本は全レーン。レベル3からたまに一部だけ
+function addBar(z){
+  let l0=0, l1=LANES-1;
+  if(level>=3 && Math.random()<0.4){
+    const w=4+Math.floor(Math.random()*5);
+    l0=Math.floor(Math.random()*(LANES-w+1)); l1=l0+w-1;
+  }
+  obstacles.push({type:'bar',l0:l0,l1:l1,z:z,d:0.8,hit:false});
+}
+// 🟪 高いカベ(レーン移動): すき間のレーンだけ通れる。ジャンプもしゃがみも効かない
+function addWall(z){
+  const g=Math.max(1,3-Math.floor(level/3));
+  const s=Math.floor(Math.random()*(LANES-g+1));
+  const gaps=[]; for(let i=0;i<g;i++) gaps.push(s+i);
+  if(s>0) obstacles.push({type:'wall',l0:0,l1:s-1,gaps:gaps,z:z,d:0.8,hit:false});
+  if(s+g<LANES) obstacles.push({type:'wall',l0:s+g,l1:LANES-1,gaps:gaps,z:z,d:0.8,hit:false});
+}
+// 🩷 ピンクのゲート(同時押し): 光ったレーンの鍵盤を全部いっしょに押していると開く
+const CHORD2=[[0,2],[0,4],[0,7]];
+const CHORD3=[[0,2,4],[0,3,5],[0,2,5]];
+function addChord(z){
+  const pats=(level>=3 && Math.random()<0.6) ? CHORD3 : CHORD2;
+  const pat=pats[Math.floor(Math.random()*pats.length)];
+  const span=pat[pat.length-1];
+  const b=Math.floor(Math.random()*(LANES-span));
+  obstacles.push({type:'chord',l0:0,l1:LANES-1,lanes:pat.map(o=>b+o),z:z,d:0.35,hit:false,ok:false,done:false});
+}
+function spawnWave(){
+  const z=ZSPAWN;
+  if(level>=2 && Math.random()<0.2){            // コンボ
+    if(Math.random()<0.5){ addBar(z); addHurdle(z+speed*1.05+1); }
+    else { addWall(z); addBar(z+speed*1.1+1); }
+    spawnCd+=0.9; return;
+  }
+  if(!bag.length) bag=shuffle(['block','bar','wall','chord']);   // 4種類をまんべんなく出す
+  const t=bag.pop();
+  if(t==='block') addHurdle(z);
+  else if(t==='bar') addBar(z);
+  else if(t==='wall') addWall(z);
+  else { addChord(z); spawnCd+=0.8; }
+}
+
+/* ---------- 更新 ---------- */
+function update(dt){
+  if(state==='title'){ dist+=6*dt; player.x+=(player.lane-player.x)*Math.min(1,dt*16); return; }
+  if(state!=='playing') return;
+  if(modZone==='max'){ pause(); return; }
+
+  lvT+=dt;
+  const nl=Math.min(12,Math.floor(lvT/CONFIG.levelSeconds));
+  if(nl>level){ level=nl; toast='SPEED UP!'; toastT=1.3; arp([72,76,79,84],70,'triangle',0.1); }
+  speed=Math.min(CONFIG.speedMax, CONFIG.speedStart+level*CONFIG.speedPerLevel);
+  dist+=speed*dt; score=Math.floor(dist);
+
+  spawnCd-=dt;
+  if(spawnCd<=0){ spawnWave(); spawnCd+=(1.15+Math.random()*0.7)*(1-level*0.025); }
+
+  // プレイヤー
+  player.x+=(player.lane-player.x)*Math.min(1,dt*16);
+  jumpReq=Math.max(0,jumpReq-dt);
+  if(jumpReq>0 && player.y===0){ player.vy=JUMP_V; jumpReq=0; tone(380,0.18,'square',0.06,760); }
+  if(player.y>0 && bend<=CONFIG.bendDuck) player.vy-=60*dt;   // 空中でピッチ下げると早く落ちる
+  player.vy-=G*dt; player.y+=player.vy*dt;
+  if(player.y<=0){ player.y=0; player.vy=0; }
+  player.crouch = bend<=CONFIG.bendDuck && player.y===0;
+  if(player.inv>0) player.inv-=dt;
+
+  // 障害物
+  const hl=heldLanes();
+  for(const o of obstacles){
+    o.z-=speed*dt;
+    if(o.type==='chord'){
+      if(o.done) continue;
+      if(o.z<CHORD_GRACE && o.z+o.d>-0.25){
+        if(o.lanes.every(l=>hl.has(l))){
+          o.done=true; o.ok=true; dist+=15; toast='NICE!'; toastT=0.9; arp([72,76,79],60,'triangle',0.1);
+        }
+      }else if(o.z+o.d<=-0.25){
+        o.done=true; o.hit=true; if(player.inv<=0) damage();
+      }
+      continue;
+    }
+    if(!o.hit && o.z<0.25 && o.z+o.d>-0.25 && player.lane>=o.l0 && player.lane<=o.l1){
+      let bad;
+      if(o.type==='block') bad = player.y<0.5;
+      else if(o.type==='wall') bad = true;
+      else { const top=player.crouch?0.5:0.95; bad = player.y<1.6 && player.y+top>0.62; }   // バーは厚いのでジャンプでは越えられない
+      if(bad){ o.hit=true; if(player.inv<=0) damage(); }
+    }
+  }
+  obstacles=obstacles.filter(o=>o.z+o.d>-0.8);
+}
+
+/* ---------- 描画ヘルパー ---------- */
+function quad(a,b,c,d,fill,stroke){
+  ctx.beginPath(); ctx.moveTo(a[0],a[1]); ctx.lineTo(b[0],b[1]); ctx.lineTo(c[0],c[1]); ctx.lineTo(d[0],d[1]); ctx.closePath();
+  ctx.fillStyle=fill; ctx.fill();
+  if(stroke){ ctx.strokeStyle=stroke; ctx.lineWidth=1.5; ctx.stroke(); }
+}
+function box(x0,x1,y0,y1,z0,z1,top,front,side){
+  if(x0>0) quad(P(x0,y0,z0),P(x0,y1,z0),P(x0,y1,z1),P(x0,y0,z1),side);
+  if(x1<0) quad(P(x1,y0,z0),P(x1,y1,z0),P(x1,y1,z1),P(x1,y0,z1),side);
+  quad(P(x0,y1,z0),P(x1,y1,z0),P(x1,y1,z1),P(x0,y1,z1),top);
+  quad(P(x0,y0,z0),P(x1,y0,z0),P(x1,y1,z0),P(x0,y1,z0),front,'rgba(0,0,0,0.28)');
+}
+function rr2(x,y,w,h,rt,rb){
+  ctx.beginPath(); ctx.moveTo(x+rt,y); ctx.lineTo(x+w-rt,y); ctx.arcTo(x+w,y,x+w,y+rt,rt);
+  ctx.lineTo(x+w,y+h-rb); ctx.arcTo(x+w,y+h,x+w-rb,y+h,rb);
+  ctx.lineTo(x+rb,y+h); ctx.arcTo(x,y+h,x,y+h-rb,rb);
+  ctx.lineTo(x,y+rt); ctx.arcTo(x,y,x+rt,y,rt); ctx.closePath();
+}
+function rr(x,y,w,h,r){ r=Math.min(r,w/2,h/2); rr2(x,y,w,h,r,r); }
+function txt(s,x,y,size,color,align,weight){
+  ctx.font=`${weight||700} ${size}px ${FONT}`; ctx.textAlign=align||'left'; ctx.textBaseline='middle'; ctx.fillStyle=color; ctx.fillText(s,x,y);
+}
+// カベの上に鍵盤ラベル(ド・レ…)を遠近つきで描く
+function lab3D(l,wx,wy,z,size,color){
+  const p=P(wx,wy,z), s=F/(F+z), px=size*U*s;
+  txt(LABELS[l],p[0],p[1],px,color,'center',900);
+  if(HIGH[l]){
+    const w=ctx.measureText(LABELS[l]).width;
+    ctx.fillStyle=color; ctx.fillRect(p[0]-w/2,p[1]-px*0.74,w,Math.max(2,px*0.1));
+  }
+}
+function chordName(o){ return o.lanes.map(l=>(HIGH[l]?'高':'')+LABELS[l]).join(' + '); }
+
+/* ---------- 背景 ---------- */
+const stars=Array.from({length:70},()=>({x:Math.random(),y:Math.random(),r:Math.random()*1.8+0.6,f:Math.random()*2+1,p:Math.random()*6}));
+const floaters=Array.from({length:9},(_,i)=>({x:Math.random(),y:Math.random(),v:0.02+Math.random()*0.03,ch:['♪','♫','♬'][i%3],sz:18+Math.random()*22,ph:Math.random()*6}));
+function drawSky(dt){
+  let g=ctx.createLinearGradient(0,0,0,horizonY);
+  g.addColorStop(0,'#070a24'); g.addColorStop(0.7,'#241552'); g.addColorStop(1,'#6a2f7a');
+  ctx.fillStyle=g; ctx.fillRect(0,0,W,horizonY+1);
+  for(const s of stars){
+    const tw=0.5+0.5*Math.sin(time*s.f+s.p);
+    ctx.globalAlpha=0.25+0.6*tw; ctx.fillStyle='#fff'; ctx.fillRect(s.x*W,s.y*horizonY*0.9,s.r,s.r);
+  }
+  ctx.globalAlpha=1;
+  const rg=ctx.createRadialGradient(cx,horizonY,0,cx,horizonY,W*0.45);
+  rg.addColorStop(0,'rgba(255,170,90,0.55)'); rg.addColorStop(1,'rgba(255,170,90,0)');
+  ctx.fillStyle=rg; ctx.fillRect(0,0,W,horizonY+1);
+  for(const n of floaters){
+    n.y-=n.v*dt; if(n.y<-0.1) n.y=1.05;
+    ctx.globalAlpha=0.14+0.08*Math.sin(time*1.5+n.ph);
+    txt(n.ch,n.x*W,n.y*horizonY,n.sz,'#fff','center',500);
+  }
+  ctx.globalAlpha=1;
+  g=ctx.createLinearGradient(0,horizonY,0,H);
+  g.addColorStop(0,'#2a1a4d'); g.addColorStop(1,'#0b0820');
+  ctx.fillStyle=g; ctx.fillRect(0,horizonY,W,H-horizonY);
+}
+
+/* ---------- 道(= ピアノの白鍵) ---------- */
+function drawRoad(){
+  const fl=ctx.createLinearGradient(0,horizonY,0,nearY);
+  fl.addColorStop(0,'#5d4a86'); fl.addColorStop(0.35,'#a79bc2'); fl.addColorStop(1,'#f7f2e7');
+  for(let i=0;i<LANES;i++){
+    quad(P(edgeX(i),0,0),P(edgeX(i+1),0,0),P(edgeX(i+1),0,ZFAR),P(edgeX(i),0,ZFAR),fl);
+  }
+  // いま押している鍵盤 / プレイヤーのいるレーンを光らせる
+  const pressed=heldLanes();
+  for(let i=0;i<LANES;i++){
+    const a = pressed.has(i) ? 0.38 : (player.lane===i ? 0.18 : 0);
+    if(a<=0) continue;
+    const g=ctx.createLinearGradient(0,horizonY,0,nearY);
+    g.addColorStop(0,'rgba(255,205,80,0)'); g.addColorStop(1,'rgba(255,205,80,'+a+')');
+    quad(P(edgeX(i),0,0),P(edgeX(i+1),0,0),P(edgeX(i+1),0,ZFAR),P(edgeX(i),0,ZFAR),g);
+  }
+  // ゲートが来るレーン(同時押しの対象)をピンクに光らせる
+  for(const o of obstacles){
+    if(o.type!=='chord'||o.done||o.z>60) continue;
+    const z0=Math.max(0.1,o.z);
+    for(const l of o.lanes) quad(P(edgeX(l),0,0),P(edgeX(l+1),0,0),P(edgeX(l+1),0,z0),P(edgeX(l),0,z0),'rgba(255,122,217,0.22)');
+  }
+  // 流れる横しま(スピード感)
+  const period=4, phase=dist%period;
+  for(let k=0;k<32;k++){
+    const z0=k*period-phase, z1=z0+0.6; if(z1<=0) continue;
+    const a=Math.max(z0,0);
+    quad(P(edgeX(0),0,a),P(edgeX(LANES),0,a),P(edgeX(LANES),0,z1),P(edgeX(0),0,z1),'rgba(70,45,120,0.13)');
+  }
+  // レーンの境目
+  ctx.strokeStyle='rgba(20,12,45,0.55)'; ctx.lineWidth=2;
+  for(let i=0;i<=LANES;i++){
+    const a=P(edgeX(i),0,0), b=P(edgeX(i),0,ZFAR);
+    ctx.beginPath(); ctx.moveTo(a[0],a[1]); ctx.lineTo(b[0],b[1]); ctx.stroke();
+  }
+}
+
+/* ---------- 障害物 ---------- */
+function drawChord(o){
+  const x0=edgeX(0), x1=edgeX(LANES), z0=o.z, z1=o.z+o.d;
+  const c = o.ok ? '143,227,136' : (o.hit ? '255,93,122' : '255,90,200');
+  quad(P(x0,0,z0),P(x1,0,z0),P(x1,WALL_H,z0),P(x0,WALL_H,z0),'rgba('+c+',0.2)','rgba('+c+',0.95)');
+  quad(P(x0,WALL_H,z0),P(x1,WALL_H,z0),P(x1,WALL_H,z1),P(x0,WALL_H,z1),'rgba('+c+',0.55)');
+  const pulse=0.5+0.5*Math.sin(time*9);
+  for(const l of o.lanes){
+    const xl=edgeX(l)+0.03, xr=edgeX(l+1)-0.03;
+    quad(P(xl,0,z0),P(xr,0,z0),P(xr,WALL_H,z0),P(xl,WALL_H,z0),
+         o.ok ? 'rgba(143,227,136,0.55)' : 'rgba(255,225,110,'+(0.35+0.25*pulse)+')','rgba(255,240,170,0.95)');
+    lab3D(l,laneCx(l),WALL_H*0.5,z0,LABELS[l].length>1?0.27:0.4,'#3a1750');
+  }
+}
+function drawObstacle(o){
+  let a=1;
+  if(o.z>55) a=Math.max(0,(ZSPAWN-o.z)/(ZSPAWN-55));
+  if(o.z+o.d<0) a=Math.max(0,1+(o.z+o.d)/0.8);
+  if(o.hit) a*=0.35;
+  if(o.ok) a*=0.7;
+  if(a<=0) return;
+  ctx.globalAlpha=a;
+  if(o.type==='chord'){ drawChord(o); ctx.globalAlpha=1; return; }
+  const x0=edgeX(o.l0)+0.04, x1=edgeX(o.l1+1)-0.04, z0=o.z, z1=o.z+o.d;
+  quad(P(x0,0,z0),P(x1,0,z0),P(x1,0,z1),P(x0,0,z1),'rgba(10,5,30,0.28)');
+  if(o.type==='block'){
+    box(x0,x1,0,0.55,z0,z1,'#ffc58f','#ff7a2e','#d85d1c');
+  }else if(o.type==='bar'){
+    box(x0-0.07,x0+0.02,0,1.65,z0+0.25,z0+0.5,'#6e6a96','#3a3659','#2c2947');
+    box(x1-0.02,x1+0.07,0,1.65,z0+0.25,z0+0.5,'#6e6a96','#3a3659','#2c2947');
+    box(x0,x1,0.62,1.6,z0,z1,'#b5fff3','#18c9b0','#0f9a88');
+  }else{ // wall
+    box(x0,x1,0,WALL_H,z0,z1,'#a79bff','#6c5ce7','#4b3fb5');
+    ctx.strokeStyle='rgba(255,255,255,0.2)'; ctx.lineWidth=1.5;
+    for(const h of [0.55,1.1,1.65]){
+      const p=P(x0,h,z0), q=P(x1,h,z0);
+      ctx.beginPath(); ctx.moveTo(p[0],p[1]); ctx.lineTo(q[0],q[1]); ctx.stroke();
+    }
+  }
+  ctx.globalAlpha=1;
+}
+
+/* ---------- プレイヤー(棒人間) ---------- */
+function figure(){
+  const ph = state==='playing' ? time*18 : 0;
+  const s = Math.sin(ph);
+  if(player.crouch){
+    return { head:[0,-0.42,0.10], scarf:null, segs:[
+      [[0,-0.32],[0,-0.17]],
+      [[0,-0.30],[-0.17,-0.20],[-0.20,-0.10]],
+      [[0,-0.30],[0.17,-0.20],[0.20,-0.10]],
+      [[0,-0.17],[-0.20,-0.13],[-0.13,0]],
+      [[0,-0.17],[0.20,-0.13],[0.13,0]] ]};
+  }
+  const w=(state==='playing'?Math.sin(time*9):0)*0.03;
+  const scarf=[[0,-0.75],[0.13,-0.70+w],[0.25,-0.73-w],[0.36,-0.70+w]];
+  if(player.y>0){
+    return { head:[0,-0.88,0.11], scarf:scarf, segs:[
+      [[0,-0.77],[0,-0.42]],
+      [[0,-0.72],[-0.18,-0.84],[-0.26,-1.0]],
+      [[0,-0.72],[0.18,-0.84],[0.26,-1.0]],
+      [[0,-0.42],[-0.17,-0.30],[-0.10,-0.14]],
+      [[0,-0.42],[0.17,-0.30],[0.10,-0.14]] ]};
+  }
+  const l=Math.max(0,s)*0.10, r=Math.max(0,-s)*0.10, a=s*0.06;
+  return { head:[0,-0.88,0.11], scarf:scarf, segs:[
+    [[0,-0.77],[0,-0.42]],
+    [[0,-0.70],[-0.17,-0.58+a],[-0.20,-0.42+a*1.5]],
+    [[0,-0.70],[0.17,-0.58-a],[0.20,-0.42-a*1.5]],
+    [[0,-0.42],[-0.10,-0.22-l*0.5],[-0.11,-l]],
+    [[0,-0.42],[0.10,-0.22-r*0.5],[0.11,-r]] ]};
+}
+function drawPlayer(){
+  const wx=laneCx(0)+player.x*worldLW;
+  const p=P(wx,0,0), sx=p[0], sy=p[1];
+  const lift=player.y*U;
+  ctx.save();
+  ctx.globalAlpha=0.35/(1+player.y*1.5); ctx.fillStyle='#000';
+  ctx.beginPath(); ctx.ellipse(sx,sy,0.26*U/(1+player.y*0.5),0.07*U,0,0,Math.PI*2); ctx.fill();
+  ctx.restore();
+
+  ctx.save();
+  if(player.inv>0 && Math.floor(time*14)%2===0) ctx.globalAlpha=0.35;
+  ctx.translate(sx,sy-lift);
+  ctx.lineCap='round'; ctx.lineJoin='round';
+  const fg=figure(), h=fg.head;
+  const stroke=(lw,col)=>{
+    ctx.strokeStyle=col; ctx.lineWidth=lw;
+    for(const sg of fg.segs){
+      ctx.beginPath();
+      sg.forEach((pt,i)=>{ if(i) ctx.lineTo(pt[0]*U,pt[1]*U); else ctx.moveTo(pt[0]*U,pt[1]*U); });
+      ctx.stroke();
+    }
+  };
+  // 白いふちどり(明るい床でも暗い背景でも見えるように)
+  stroke(0.095*U,'rgba(255,255,255,0.9)');
+  ctx.beginPath(); ctx.arc(h[0]*U,h[1]*U,h[2]*U+0.03*U,0,Math.PI*2); ctx.fillStyle='rgba(255,255,255,0.9)'; ctx.fill();
+  // 本体
+  stroke(0.055*U,'#1c1740');
+  ctx.beginPath(); ctx.arc(h[0]*U,h[1]*U,h[2]*U,0,Math.PI*2);
+  ctx.fillStyle='#ffd24a'; ctx.fill();
+  ctx.lineWidth=0.045*U; ctx.strokeStyle='#1c1740'; ctx.stroke();
+  // マフラー
+  if(fg.scarf){
+    ctx.strokeStyle='#ff5d7a'; ctx.lineWidth=0.05*U;
+    ctx.beginPath(); fg.scarf.forEach((pt,i)=>{ if(i) ctx.lineTo(pt[0]*U,pt[1]*U); else ctx.moveTo(pt[0]*U,pt[1]*U); }); ctx.stroke();
+  }
+  ctx.restore();
+}
+
+/* ---------- 手前の鍵盤(ラベル) ---------- */
+const GLYPH={ block:['▲','#ff7a2e'], bar:['▼','#18c9b0'], wall:['×','#8a7bff'], gap:['◎','#4cc26a'], chord:['♪','#ff4fc4'] };
+function drawKeys(){
+  const y0=nearY, hK=H-nearY;
+  const pressed=heldLanes();
+  const warn=new Array(LANES).fill(null);
+  const setW=(l,z,type)=>{ if(!warn[l]||z<warn[l].z) warn[l]={z:Math.max(z,0),type:type}; };
+  for(const o of obstacles){
+    if(o.hit||o.done||o.z+o.d<0||o.z>34) continue;
+    if(o.type==='chord'){ o.lanes.forEach(l=>setW(l,o.z,'chord')); continue; }
+    for(let l=o.l0;l<=o.l1;l++) setW(l,o.z,o.type);
+    if(o.type==='wall') o.gaps.forEach(l=>setW(l,o.z,'gap'));
+  }
+  const fs=Math.min(laneW*0.42,hK*0.38);
+  for(let i=0;i<LANES;i++){
+    const x=cx+(i-LANES/2)*laneW;
+    const g=ctx.createLinearGradient(0,y0,0,H);
+    if(pressed.has(i)){ g.addColorStop(0,'#ffe28a'); g.addColorStop(1,'#ffb41f'); }
+    else if(player.lane===i){ g.addColorStop(0,'#fff3c9'); g.addColorStop(1,'#f0dca0'); }
+    else { g.addColorStop(0,'#fbf7ec'); g.addColorStop(1,'#ddd5c2'); }
+    ctx.fillStyle=g; rr2(x+1.5,y0,laneW-3,hK+10,2,10); ctx.fill();
+    const ty=y0+hK*0.62;
+    txt(LABELS[i],x+laneW/2,ty,fs,'#2a2150','center',900);
+    if(HIGH[i]){
+      const w=ctx.measureText(LABELS[i]).width;
+      ctx.fillStyle='#e0457b'; ctx.fillRect(x+laneW/2-w/2,ty-fs*0.74,w,Math.max(3,fs*0.1));
+    }
+    const wn=warn[i];
+    if(wn){
+      const a=Math.min(1,(34-wn.z)/20), gl=GLYPH[wn.type];
+      ctx.globalAlpha=a;
+      txt(gl[0],x+laneW/2,y0+hK*0.24,(0.2+0.12*a)*laneW,gl[1],'center',900);
+      ctx.globalAlpha=1;
+      if(wn.type==='chord'){   // 押すべき鍵盤にリング。押せたら緑
+        ctx.strokeStyle = pressed.has(i) ? '#4cc26a' : 'rgba(255,79,196,'+(0.6+0.4*Math.sin(time*10))+')';
+        ctx.lineWidth=4; rr2(x+3.5,y0+2,laneW-7,hK-4,3,10); ctx.stroke();
+      }
+    }
+  }
+  ctx.fillStyle='rgba(0,0,0,0.3)'; ctx.fillRect(cx-LANES/2*laneW,nearY-2,LANES*laneW,3);
+}
+
+function drawEntities(){
+  const items=[{z:0,p:true}];
+  for(const o of obstacles) items.push({z:o.z+o.d/2,o:o});
+  items.sort((a,b)=>b.z-a.z);
+  for(const it of items){ if(it.p) drawPlayer(); else drawObstacle(it.o); }
+}
+
+/* ---------- HUD・オーバーレイ ---------- */
+function drawHUD(){
+  const k=sc(), pad=18*k;
+  txt('きょり',pad,22*k,13*k,'#b8aee0','left',700);
+  txt(score+' m',pad,48*k,34*k,'#ffffff','left',900);
+  txt('BEST '+best+' m',pad,76*k,14*k,'#ffd24a','left',700);
+  for(let i=0;i<CONFIG.lives;i++){
+    txt('♥',cx+(i-(CONFIG.lives-1)/2)*34*k,36*k,30*k,i<lives?'#ff5d7a':'rgba(255,255,255,0.18)','center',900);
+  }
+  const gw=140*k, gx=W-pad-gw;
+  txt('LV '+(level+1),W-pad,22*k,15*k,'#ffffff','right',900);
+  // ピッチ
+  txt('PITCH',gx-8*k,50*k,11*k,'#b8aee0','right',700);
+  ctx.fillStyle='rgba(255,255,255,0.12)'; rr(gx,45*k,gw,10*k,5*k); ctx.fill();
+  const bw=Math.abs(bend)*gw/2;
+  ctx.fillStyle=bend>=0?'#ffb36b':'#7ff5e3';
+  if(bw>0.5) ctx.fillRect(bend>=0?gx+gw/2:gx+gw/2-bw,45*k,bw,10*k);
+  ctx.fillStyle='rgba(255,255,255,0.6)'; ctx.fillRect(gx+gw/2-1,43*k,2,14*k);
+  // MOD
+  txt('MOD',gx-8*k,72*k,11*k,'#b8aee0','right',700);
+  ctx.fillStyle='rgba(255,255,255,0.12)'; rr(gx,67*k,gw,10*k,5*k); ctx.fill();
+  ctx.fillStyle=modZone==='max'?'#ff5d7a':(modZone==='mid'?'#8fe388':'#8a82b3');
+  if(mod>0) ctx.fillRect(gx,67*k,gw*mod/127,10*k);
+  // 状態テキスト
+  let m=midiText; if(m.length>38) m=m.slice(0,37)+'…';
+  txt(m,W-pad,95*k,12*k,'#b8aee0','right',500);
+  if(!audioOn()) txt('🔇 音を出すには画面を1回タップ',W-pad,114*k,12*k,'#ffd24a','right',500);
+  if(toastT>0){
+    ctx.globalAlpha=Math.min(1,toastT*2);
+    txt(toast,cx,H*0.2,40*k,'#ffd24a','center',900);
+    ctx.globalAlpha=1;
+  }
+  // 同時押しゲートが近いときのお知らせ
+  if(state==='playing'){
+    let c=null;
+    for(const o of obstacles){ if(o.type==='chord'&&!o.done&&o.z<34&&o.z+o.d>-0.25&&(!c||o.z<c.z)) c=o; }
+    if(c){
+      const hl=heldLanes(), allOn=c.lanes.every(l=>hl.has(l));
+      txt(allOn?'OK! そのままキープ':'同時に押して!  '+chordName(c),cx,H*0.27,30*k,allOn?'#8fe388':'#ff7ad9','center',900);
+    }
+  }
+}
+function dim(a){ ctx.fillStyle='rgba(7,5,25,'+a+')'; ctx.fillRect(0,0,W,nearY); }
+function blink(){ return 0.55+0.45*Math.sin(time*5); }
+function drawOverlay(){
+  const k=sc();
+  if(state==='title'){
+    dim(0.58);
+    txt('KEY RUNNER',cx,H*0.12,18*k,'#ffd24a','center',900);
+    txt('鍵盤ランナー',cx,H*0.19,60*k,'#ffffff','center',900);
+    ctx.globalAlpha=blink();
+    txt('どれか鍵盤を押してスタート!',cx,H*0.27,28*k,'#ffd24a','center',900);
+    ctx.globalAlpha=1;
+    const pw=760*k, ph=262*k, px=cx-pw/2, py=H*0.33;
+    ctx.fillStyle='rgba(255,255,255,0.09)'; rr(px,py,pw,ph,18*k); ctx.fill();
+    const rows=[
+      ['#ffd24a','鍵盤を押す','そのレーンへ移動(ド〜ソの12レーン)'],
+      ['#ff7a2e','オレンジの低いカベ','ピッチ↑でジャンプ'],
+      ['#18c9b0','青緑の頭上バー','ピッチ↓でしゃがむ(押してる間)'],
+      ['#8a7bff','紫の高いカベ','すき間のレーンの鍵盤へ移動'],
+      ['#ff5ad0','ピンクのゲート','光ったレーンの鍵盤を同時に押す'],
+      ['#8fe388','MODホイール','最大=ポーズ / 中間=再開 / 最小=最初から'],
+    ];
+    rows.forEach((r,i)=>{
+      const yy=py+(31+i*40)*k;
+      ctx.fillStyle=r[0]; ctx.beginPath(); ctx.arc(px+26*k,yy,8*k,0,Math.PI*2); ctx.fill();
+      txt(r[1],px+46*k,yy,19*k,'#ffffff','left',900);
+      txt(r[2],px+270*k,yy,18*k,'#d8d0f5','left',500);
+    });
+  }else if(state==='paused'){
+    dim(0.62);
+    txt('ポーズ中',cx,H*0.30,60*k,'#ffffff','center',900);
+    txt('MODホイールを少し下げると再開',cx,H*0.42,24*k,'#ffd24a','center',700);
+    txt('いちばん下げると最初から',cx,H*0.49,20*k,'#b8aee0','center',500);
+  }else if(state==='gameover'){
+    dim(0.62);
+    txt('GAME OVER',cx,H*0.25,62*k,'#ff5d7a','center',900);
+    txt('きょり '+score+' m',cx,H*0.37,36*k,'#ffffff','center',900);
+    if(newRecord) txt('✨ NEW RECORD! ✨',cx,H*0.45,26*k,'#ffd24a','center',900);
+    if(time-goAt>1.2){
+      ctx.globalAlpha=blink();
+      txt('どれか鍵盤でリトライ',cx,H*0.54,28*k,'#ffd24a','center',900);
+      ctx.globalAlpha=1;
+    }else{
+      txt('…',cx,H*0.54,28*k,'rgba(255,255,255,0.5)','center',900);
+    }
+    txt('MOD最小でタイトルへ',cx,H*0.61,18*k,'#b8aee0','center',500);
+  }
+}
+
+function render(dt){
+  ctx.save();
+  if(shake>0){ const m=shake*18; ctx.translate((Math.random()-0.5)*m,(Math.random()-0.5)*m); }
+  drawSky(dt); drawRoad(); drawEntities(); drawKeys();
+  ctx.restore();
+  drawHUD(); drawOverlay();
+  if(flash>0){ ctx.fillStyle='rgba(255,60,60,'+(flash*0.6)+')'; ctx.fillRect(0,0,W,H); }
+}
+
+/* ---------- メインループ ---------- */
+function frame(ts){
+  const dt=Math.min(0.05,(ts-last)/1000||0); last=ts;
+  time+=dt;
+  layout();
+  update(dt);
+  shake=Math.max(0,shake-dt); flash=Math.max(0,flash-dt*1.4); toastT=Math.max(0,toastT-dt);
+  render(dt);
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
