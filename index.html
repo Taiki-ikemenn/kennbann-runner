@@ -43,7 +43,7 @@ window.addEventListener('error',function(ev){ showErr((ev&&ev.message)+' (行 '+
    ポーズ中に ド+ミ+ソ を同時に押すと「かんたんモード」切りかえ
    ポーズ中に レ+ファ+ラ を同時に押すと「無敵モード」切りかえ(ハート∞)
    ポーズ中に レ+ファ+ラ+高いド を同時に押すと「やり直しモード」(無敵中にミスすると同じ障害物がもう一度出る・きょり/レベルはそのまま)
-   🪜 階段+マグマ            … 3レーン幅。ジャンプで3段のぼる。のれないとマグマに落ちてハート0
+   🪜 階段+マグマ            … マグマは全レーン。3レーン幅の階段にジャンプで登る。階段にのれないとマグマに落ちてハート0
    🔨 こわすモード           … ポーズ中に ド→レ→ミ を順番に押す(またはボタン)。四角がきたレーンの鍵盤をタイミングよく押してこわす
    スタートレベル: タイトルで ◀▶ ボタン(または黒鍵 ド♯=−/レ♯=+)。LV○からスタートできる(ベスト記録はLV1スタートのときだけ)
    タッチ: 画面のどこでも 上スライド=ジャンプ / 下スライド=しゃがむ。下の鍵盤をタップ=鍵盤 / 鍵盤から上にスライド=ジャンプ / 下にスライド=しゃがむ(指をはなすまで)
@@ -464,7 +464,7 @@ function addSlope(z){
   if(Math.random()<0.5) notes.reverse();
   makeGate(z,notes,true,black);
 }
-// 🪜 階段+マグマ(3レーン): ジャンプで3段のぼる。のれないとマグマに落ちてハート0
+// 🪜 階段+マグマ: マグマは全レーンの階段の下に広がる。3レーン幅の階段にジャンプで登って渡る。のれないとマグマに落ちてハート0
 function addStairs(z){
   const l0=Math.floor(Math.random()*(LANES-2)), sd=Math.max(6,speed*0.95), pit=Math.max(2.2,sd*0.35);
   obstacles.push({type:'stairs',l0:l0,l1:l0+2,z:z,d:pit+3*sd,sd:sd,pit:pit,hit:false});
@@ -585,9 +585,10 @@ function update(dt){
   jumpReq=Math.max(0,jumpReq-dt);
   // 階段: その段より低いままマグマの上に入ったらアウト
   for(const o of obstacles){
-    if(o.type!=='stairs'||o.hit||player.lane<o.l0||player.lane>o.l1) continue;
+    if(o.type!=='stairs'||o.hit) continue;
     const i=stairIdx(o); if(i===-2) continue;
-    const need = i<0 ? 0.03 : STAIR_H[i]-0.06;   // 池の上は空中、段の上はその段より高く
+    const onStairs=player.lane>=o.l0&&player.lane<=o.l1;
+    const need = (i<0||!onStairs) ? 0.03 : STAIR_H[i]-0.06;   // 階段いがい(マグマ)は空中でないとアウト、段の上はその段より高く
     if(player.y<need){ o.hit=true; lavaDeath(o,i<0?0:STAIR_H[i]); if(state!=='playing') return; }
   }
   const gh=groundAt();
@@ -767,9 +768,10 @@ function drawChord(o){
 function drawStairs(o){
   const x0=edgeX(o.l0)+0.03, x1=edgeX(o.l1+1)-0.03, zn=-0.4;
   const z0=Math.max(o.z,zn), z1=Math.max(o.z+o.d,zn+0.01), pulse=0.5+0.5*Math.sin(time*5);
-  quad(P(x0,0,z0),P(x1,0,z0),P(x1,0,z1),P(x0,0,z1),'rgb('+Math.round(205+35*pulse)+','+Math.round(55+30*pulse)+',40)','rgba(255,170,60,0.95)');
-  for(let i=0;i<6;i++){   // マグマのぶくぶく
-    const zz=z0+((time*0.6+i*0.37)%1)*(z1-z0), xx=x0+((i*0.31+0.13)%1)*(x1-x0), p=P(xx,0.03,zz), sc2=F/(F+zz);
+  const lx0=edgeX(0), lx1=edgeX(LANES);   // マグマは全レーン
+  quad(P(lx0,0,z0),P(lx1,0,z0),P(lx1,0,z1),P(lx0,0,z1),'rgb('+Math.round(205+35*pulse)+','+Math.round(55+30*pulse)+',40)','rgba(255,170,60,0.95)');
+  for(let i=0;i<14;i++){   // マグマのぶくぶく
+    const zz=z0+((time*0.6+i*0.37)%1)*(z1-z0), xx=lx0+((i*0.31+0.13)%1)*(lx1-lx0), p=P(xx,0.03,zz), sc2=F/(F+zz);
     ctx.fillStyle='rgba(255,226,130,0.75)'; ctx.beginPath(); ctx.arc(p[0],p[1],0.05*U*sc2,0,Math.PI*2); ctx.fill();
   }
   const tops=['#8fd3ff','#6bbcf5','#4aa3e8'];
@@ -889,7 +891,7 @@ function drawPlayer(){
 }
 
 /* ---------- 手前の鍵盤(ラベル) ---------- */
-const GLYPH={ block:['▲','#ff7a2e'], bar:['▼','#18c9b0'], wall:['×','#8a7bff'], gap:['◎','#4cc26a'], chord:['♪','#ff4fc4'], stairs:['▲▲','#ff6a3d'], brick:['■','#ffd24a'] };
+const GLYPH={ block:['▲','#ff7a2e'], bar:['▼','#18c9b0'], wall:['×','#8a7bff'], gap:['◎','#4cc26a'], chord:['♪','#ff4fc4'], stairs:['▲▲','#4cc26a'], lava:['≈','#ff3b3b'], brick:['■','#ffd24a'] };
 function drawKeys(){
   const y0=nearY, hK=H-nearY;
   const pressed=heldLanes();
@@ -907,6 +909,7 @@ function drawKeys(){
       });
       continue;
     }
+    if(o.type==='stairs'){ for(let l=0;l<LANES;l++) setW(l,o.z,(l>=o.l0&&l<=o.l1)?'stairs':'lava'); continue; }
     for(let l=o.l0;l<=o.l1;l++) setW(l,o.z,o.type);
     if(o.type==='wall') o.gaps.forEach(l=>setW(l,o.z,'gap'));
   }
